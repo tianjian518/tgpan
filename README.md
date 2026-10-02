@@ -168,6 +168,18 @@ Teldrive 提供 WebDAV 接口。在播放器里添加 WebDAV：
 docker logs tgpan
 ```
 
+**Q：日志报 `initdb: error: could not access directory "/data/postgres": Permission denied`？**
+
+数据目录权限问题。新版镜像已自动处理，若仍出现，手动执行：
+```bash
+chmod 755 <你映射到 /data 的主机目录>
+```
+然后重启容器。
+
+> 原因：容器里 postgres 用户要走进 `/data` 才能初始化数据库，
+> 而挂载出来的目录通常 `mode 700`（只有 root 能进），把 postgres 挡在门外了。
+> 注意：飞牛 NAS 的「文件权限」界面改的是它自己的 ACL，**不等于** Linux 的 mode，改那里没用。
+
 **Q：登录时收不到验证码？**
 - 手机号要带国家码（`+86...`）
 - 如果这个号之前登录过别处，TG 可能把验证码发到 **TG App 里**而不是短信
