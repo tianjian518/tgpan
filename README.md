@@ -1,0 +1,181 @@
+# TGPan · 把 Telegram 频道变成无限云盘
+
+一个 Docker 镜像搞定：**Telegram 频道 → 网盘界面 → 在线看片 → WebDAV 挂播放器**。
+
+> 支持 `amd64` / `arm64`，专门适配 **甲骨文 ARM 免费机 + 飞牛 OS**。
+
+---
+
+## 它能干什么
+
+| 能力 | 说明 |
+|---|---|
+| 📁 无限空间 | 用 Telegram 频道当硬盘，**容量几乎无限、完全免费、不用会员** |
+| 🖥 网盘界面 | 网页上像百度网盘一样浏览、上传、下载、重命名、删除 |
+| ▶️ 在线播放 | 点视频直接在网页里播放 |
+| 🔗 挂播放器 | 通过 WebDAV 挂到 Infuse / VidHub / 网易爆米花 / nPlayer / PotPlayer |
+| 🔐 扫码登录 | **手机号登录 或 二维码扫码登录**，不用去申请 api_id |
+| 📦 单镜像 | 数据库 + Teldrive + 界面全打包，一条命令起飞 |
+
+---
+
+## 快速开始
+
+### 方式一：docker run
+
+```bash
+docker run -d \
+  --name tgpan \
+  --restart unless-stopped \
+  -p 8080:8080 \
+  -v /你的路径/tgpan/data:/data \
+  -e TZ=Asia/Shanghai \
+  tianjian518/tgpan:latest
+```
+
+### 方式二：docker compose（推荐）
+
+```bash
+mkdir tgpan && cd tgpan
+curl -O https://raw.githubusercontent.com/tianjian518/tgpan/main/docker-compose.yml
+docker compose up -d
+```
+
+### 然后
+
+1. 浏览器打开 **`http://你的服务器IP:8080`**
+2. 用 **手机号** 或 **扫码** 登录你的 TG 小号
+3. 进去就能看到你的频道/文件，开始用 🎉
+
+> 首次启动需要初始化数据库，大约等 **30~60 秒**。
+
+---
+
+## 在飞牛 OS 上安装（你的场景）
+
+1. 飞牛 → **Docker** → **镜像仓库**
+2. 搜索 `tianjian518/tgpan` → 下载 `latest`
+3. **创建容器**：
+   - 端口映射：`8080` → `8080`
+   - 存储映射：建一个目录（如 `/vol1/docker/tgpan/data`）挂到容器 `/data`
+   - 环境变量：`TZ=Asia/Shanghai`
+   - 重启策略：**除非停止**（保证开机自启）
+4. 启动后访问 `http://飞牛IP:8080`
+
+> ⚠️ 如果你的飞牛只能内网访问，外网看片需要额外的内网穿透方案（见文末）。
+
+---
+
+## 关键：Telegram 登录
+
+**好消息：不用去 my.telegram.org 申请 api_id。**
+
+镜像内置了公共应用凭据，你只需要：
+
+| 登录方式 | 说明 |
+|---|---|
+| **手机号登录** | 填 `+86 你的号码` → 收验证码 → 完成 |
+| **二维码登录** | 点 `QR Login` → 用手机 TG 扫一下 → 完成 |
+
+> 💡 **建议用小号**。
+> ⚠️ 官方警告：滥用 TG API 会**立即封号**；大量囤积文件会导致**频道被清空**。正常使用（看片、少量上传）没问题，别疯狂刷。
+
+---
+
+## 挂载到播放器（WebDAV）
+
+Teldrive 提供 WebDAV 接口。在播放器里添加 WebDAV：
+
+| 播放器 | 怎么加 |
+|---|---|
+| **Infuse** (iOS/Apple TV) | 添加文件来源 → WebDAV |
+| **VidHub** | 添加 → WebDAV |
+| **网易爆米花** | 添加存储 → WebDAV |
+| **nPlayer** | 网络 → WebDAV |
+| **Windows 资源管理器** | 映射网络驱动器 |
+| **PotPlayer** | 打开 → 远程连接 → WebDAV |
+
+> 地址填 `http://你的IP:8080`，用户名密码用你 TG 登录后的信息（或在 Teldrive 设置里查看）。
+
+---
+
+## 端口
+
+| 端口 | 用途 |
+|---|---|
+| **8080** | 网页界面（看片、管理、WebDAV） |
+
+---
+
+## 关于速度和卡顿
+
+- **Teldrive 支持 302 直链**：播放器可以直连 TG 拿数据，不走你服务器带宽
+- 但 TG 官方对个人账号有**限流**，频道文件特别多时首次加载会慢
+- 建议：**保持默认的 `rate-limit = true`**（防封号），不要为了速度关掉
+
+---
+
+## 常见问题
+
+**Q：打开 8080 没反应？**
+等 30~60 秒（首次要初始化数据库）。还不行就看日志：
+```bash
+docker logs tgpan
+```
+
+**Q：登录时收不到验证码？**
+- 手机号要带国家码（`+86...`）
+- 如果这个号之前登录过别处，TG 可能把验证码发到 **TG App 里**而不是短信
+- 或者直接用**扫码登录**，最省事
+
+**Q：数据会丢吗？**
+不会。数据库、TG 会话、配置全在 `/data`（你映射的目录）里。删容器重建数据还在。
+
+**Q：外网访问怎么办？**
+飞牛自带的远程访问可以。如果嫌卡，可以用 Cloudflare Tunnel 等方案（后续可加）。
+
+---
+
+## 技术架构
+
+```
+┌──────────────────────────────────────────┐
+│  容器 tgpan                            │
+│                                           │
+│  ┌────────────────┐   ┌────────────────┐ │
+│  │  Teldrive      │◀──│ PostgreSQL 17  │ │
+│  │  :8080         │   │ + pgroonga     │ │
+│  │  连TG/切片/302  │   │ :5432          │ │
+│  │  Web UI + API  │   └────────────────┘ │
+│  └────────┬───────┘                       │
+└───────────┼───────────────────────────────┘
+            │ MTProto
+      Telegram 服务器
+```
+
+- **Teldrive**（开源，Go）：负责连 TG、文件切片存储、文件流、302 直链、Web 界面
+- **PostgreSQL + pgroonga**：Teldrive 的元数据与全文搜索（硬依赖）
+
+---
+
+## 自己构建
+
+```bash
+git clone https://github.com/tianjian518/tgpan.git
+cd tgpan
+docker build -t tgpan .
+bash scripts/verify.sh   # 本地验证
+```
+
+> 多架构镜像通过 GitHub Actions 自动构建并推送到 Docker Hub（见 `.github/workflows/docker.yml`）。
+
+---
+
+## 致谢
+
+- [Teldrive](https://github.com/tgdrive/teldrive) —— 核心引擎
+- [pgroonga](https://pgroonga.github.io/) —— 全文搜索
+
+## License
+
+本项目（Docker 封装与脚本）MIT。Teldrive 遵循其原始协议。

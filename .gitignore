@@ -1,0 +1,17 @@
+# 数据与运行时产物
+data/
+*.log
+
+# 依赖
+node_modules/
+dist/
+__pycache__/
+*.pyc
+
+# 编辑器
+.vscode/
+.idea/
+.DS_Store
+
+# 构建缓存
+.cache/

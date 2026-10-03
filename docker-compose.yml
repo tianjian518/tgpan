@@ -1,0 +1,19 @@
+services:
+  tgpan:
+    image: tianjian518/tgpan:latest
+    container_name: tgpan
+    restart: unless-stopped
+    ports:
+      # Web 界面：看片、管理文件、扫码登录
+      - "8080:8080"
+    volumes:
+      # 数据库 + TG 会话 + 配置全在这里，容器重建不丢数据
+      - ./data:/data
+    environment:
+      - TZ=Asia/Shanghai
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8080/api/version"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 60s
