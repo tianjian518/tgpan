@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"path"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -69,7 +70,11 @@ type ScanResult struct {
 	HighWater int `json:"highWater"`
 	// AutoScan 是否已登记自动扫描
 	AutoScan bool   `json:"autoScan"`
-	Message  string `json:"message"`
+	// EpisodeMatched 其中被识别为剧集、并归入剧名子文件夹的文件数
+	EpisodeMatched int `json:"episodeMatched"`
+	// SeriesFolders 本次用到的剧名子文件夹数量
+	SeriesFolders int    `json:"seriesFolders"`
+	Message       string `json:"message"`
 }
 
 // normalizeChannelId 兼容 -100 前缀和裸 ID，统一返回裸 ID
@@ -86,19 +91,23 @@ func normalizeChannelId(id int64) int64 {
 	return id
 }
 
-// extractVideo 从消息里提取视频信息
-func extractVideo(msg *tg.Message) (*tg.Document, string, int64, bool) {
+// extractVideo 从消息里提取视频信息。
+//
+// 第三个返回值是消息自带的文字（caption）。很多影视频道发片时文件名里
+// 只有「05.mp4」这种没头没尾的东西，真正的剧名和集数写在配文里，所以
+// caption 必须带出去给剧集识别当兜底。
+func extractVideo(msg *tg.Message) (*tg.Document, string, string, int64, bool) {
 	if msg == nil || msg.Media == nil {
-		return nil, "", 0, false
+		return nil, "", "", 0, false
 	}
 
 	media, ok := msg.Media.(*tg.MessageMediaDocument)
 	if !ok {
-		return nil, "", 0, false
+		return nil, "", "", 0, false
 	}
 	doc, ok := media.Document.(*tg.Document)
 	if !ok {
-		return nil, "", 0, false
+		return nil, "", "", 0, false
 	}
 
 	var fname string
@@ -114,7 +123,7 @@ func extractVideo(msg *tg.Message) (*tg.Document, string, int64, bool) {
 
 	if !isVideo {
 		if fname == "" || category.GetCategory(fname) != category.Video {
-			return nil, "", 0, false
+			return nil, "", "", 0, false
 		}
 	}
 
@@ -122,7 +131,7 @@ func extractVideo(msg *tg.Message) (*tg.Document, string, int64, bool) {
 		fname = fmt.Sprintf("video_%d.mp4", msg.ID)
 	}
 
-	return doc, fname, doc.Size, true
+	return doc, fname, msg.Message, doc.Size, true
 }
 
 // FilesScanChannel 扫描一个频道，把视频登记进网盘
@@ -156,6 +165,13 @@ func (a *apiService) FilesScanChannel(ctx context.Context, req ScanRequest) (*Sc
 
 	result := &ScanResult{ChannelId: channelId}
 	var collected []models.File
+
+	// 剧集识别用的累加状态（每部剧单独记一份，见主循环注释）
+	seriesTitles := map[string]bool{}
+	seriesNames := map[string][]models.File{}
+	var nonSeries []models.File
+	// epTags[i] 对应 collected[i] 的剧集识别结果
+	var epTags []EpisodeInfo
 
 	err = client.Run(ctx, func(ctx context.Context) error {
 		tgAPI := client.API()
@@ -268,7 +284,7 @@ func (a *apiService) FilesScanChannel(ctx context.Context, req ScanRequest) (*Sc
 					maxID = msg.ID
 				}
 
-				doc, fname, size, ok := extractVideo(msg)
+				doc, fname, caption, size, ok := extractVideo(msg)
 				if !ok || size < req.MinSize {
 					result.Skipped++
 					continue
@@ -290,8 +306,36 @@ func (a *apiService) FilesScanChannel(ctx context.Context, req ScanRequest) (*Sc
 				sizeCopy := size
 				now := time.Now().UTC()
 
+				// ---- 剧集识别 ----
+				//
+				// 先看文件名，文件名认不出来再看消息配文。
+				// 只要认出了「第几集」，就把文件改名成规范格式，并挂到一个
+				// 以剧名命名的子文件夹下；认不出来就照旧平铺。
+				//
+				// 注意：这里只是「记下」这个文件属于哪部剧，真正建剧名文件夹、
+				// 挂 parent_id 要等频道文件夹建好之后才能做 —— 剧名文件夹是
+				// 挂在频道文件夹底下的。
+				fileName := cleanMediaName(sanitizeName(fname))
+
+				er := ResolveEpisodeFilename(fileName, caption)
+				ep := er.Info
+				if er.Ok {
+					fileName = er.Name
+					seriesTitles[ep.Title] = true
+					// 同名去重只在本剧内部做。跨剧去重会把
+					// 「A剧 S01E01」和「B剧 S01E01」误判成重名
+					fileName = uniqueFileName(seriesNames[ep.Title], fileName)
+					seriesNames[ep.Title] = append(seriesNames[ep.Title],
+						models.File{Name: fileName})
+					result.EpisodeMatched++
+				} else {
+					// 认不出来的，在本次扫描的全部平铺文件里去重
+					fileName = uniqueFileName(nonSeries, fileName)
+					nonSeries = append(nonSeries, models.File{Name: fileName})
+				}
+
 				collected = append(collected, models.File{
-					Name:      uniqueFileName(collected, cleanMediaName(sanitizeName(fname))),
+					Name:      fileName,
 					Type:      "file",
 					MimeType:  mimeType,
 					Size:      &sizeCopy,
@@ -302,6 +346,8 @@ func (a *apiService) FilesScanChannel(ctx context.Context, req ScanRequest) (*Sc
 					CreatedAt: &now,
 					UpdatedAt: &now,
 				})
+				// 按顺序记下每个文件对应的剧集信息，下标与 collected 一一对应
+				epTags = append(epTags, ep)
 			}
 
 			if reachedCursor || batch < 100 {
@@ -342,10 +388,45 @@ func (a *apiService) FilesScanChannel(ctx context.Context, req ScanRequest) (*Sc
 		result.FolderId = folder.ID
 		result.FolderName = folder.Name
 
+		// 4.1 建剧名子文件夹
+		//
+		//   「狂飙 S01E01.mp4」「狂飙 S01E02.mp4」... 全部收进
+		//   频道文件夹/狂飙/ 底下，电影和认不出来的照旧平铺在频道文件夹下。
+		//
+		//   文件夹按剧名去重复用（ensureFolder 内部先查后建），所以同一部剧
+		//   无论分几次扫到，都只会有一个文件夹。
+		seriesFolders := map[string]string{} // 剧名 -> 文件夹 ID
+		if len(seriesTitles) > 0 {
+			// 排序后再建，保证多次扫描的创建顺序稳定，日志好看
+			names := make([]string, 0, len(seriesTitles))
+			for t := range seriesTitles {
+				names = append(names, t)
+			}
+			sort.Strings(names)
+
+			for _, t := range names {
+				sf, err := a.ensureFolder(ctx, userId, sanitizeName(t), folder.ID)
+				if err != nil {
+					return fmt.Errorf("创建剧集文件夹「%s」失败: %w", t, err)
+				}
+				seriesFolders[t] = sf.ID
+			}
+			result.SeriesFolders = len(seriesFolders)
+		}
+
 		if len(collected) > 0 {
 			var totalSize int64
 			for i := range collected {
-				collected[i].ParentId = &folder.ID
+				// 认出了剧集的挂到剧名子文件夹下，其余平铺在频道文件夹下
+				if i < len(epTags) && epTags[i].Ok {
+					if fid, ok := seriesFolders[epTags[i].Title]; ok && fid != "" {
+						collected[i].ParentId = &fid
+					} else {
+						collected[i].ParentId = &folder.ID
+					}
+				} else {
+					collected[i].ParentId = &folder.ID
+				}
 				c := string(category.GetCategory(collected[i].Name))
 				collected[i].Category = &c
 				totalSize += *collected[i].Size

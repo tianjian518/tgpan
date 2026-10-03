@@ -130,6 +130,22 @@
     '#tgpan-empty{text-align:center;padding:36px 16px;font-size:13.5px;',
     'color:var(--color-on-surface-variant,#999);line-height:1.9}',
 
+    /* 剧集卡片 */
+    '.tgpan-series-grid{display:grid;gap:10px}',
+    '.tgpan-series-card{border:1px solid var(--color-outline-variant,#e6e8eb);',
+    'border-radius:11px;padding:13px 15px;background:var(--color-surface,#fff)}',
+    '.tgpan-series-name{font-size:14.5px;font-weight:650;margin-bottom:5px}',
+    '.tgpan-series-meta{font-size:12.5px;color:' + ACCENT + ';margin-bottom:9px}',
+    '.tgpan-series-detail{display:flex;gap:8px;font-size:12px;margin-bottom:8px}',
+    '.tgpan-series-detail .k{flex:0 0 68px;color:var(--color-on-surface-variant,#888)}',
+    '.tgpan-series-detail .v{flex:1;word-break:break-all}',
+    '.tgpan-series-samples{display:flex;flex-wrap:wrap;gap:5px;margin-bottom:10px}',
+    '.tgpan-chip{font-size:11.5px;padding:3px 8px;border-radius:5px;',
+    'background:var(--color-surface-container-low,#f2f4f7);',
+    'color:var(--color-on-surface-variant,#555);',
+    'font-family:ui-monospace,Menlo,Consolas,monospace}',
+    '.tgpan-series-ops{display:flex;gap:8px}',
+
     '@media(max-width:600px){',
     '#tgpan-fab{right:14px;bottom:14px;padding:11px 16px;font-size:14px}',
     '#tgpan-head,#tgpan-tabs{padding-left:16px;padding-right:16px}',
@@ -247,6 +263,7 @@
       '      <button class="tgpan-tab active" data-tab="scan">📡 扫描频道</button>',
       '      <button class="tgpan-tab" data-tab="auto">🔄 自动扫描</button>',
       '      <button class="tgpan-tab" data-tab="webdav">🔗 WebDAV</button>',
+      '      <button class="tgpan-tab" data-tab="series">🎬 剧集</button>',
       '      <button class="tgpan-tab" data-tab="help">💡 帮助</button>',
       '    </div>',
       '  </div>',
@@ -306,6 +323,19 @@
       '      <div id="tgpan-cred-result" class="tgpan-result"></div>',
       '    </div>',
 
+      '    <div class="tgpan-pane" data-pane="series">',
+      '      <div class="tgpan-help" style="margin-top:0">',
+      '        <b>剧集自动归档</b>：扫描时如果认出文件名（或消息配文）里的「第几集」，',
+      '        会自动把这一集改名成 <code>剧名 S01E05.mp4</code>，',
+      '        并收进频道文件夹下面的「剧名」子文件夹。认不出来的就平铺放着，不动它。',
+      '      </div>',
+      '      <div id="tgpan-series-list" style="margin-top:16px"></div>',
+      '      <div id="tgpan-series-result" class="tgpan-result"></div>',
+      '      <div style="margin-top:16px">',
+      '        <button class="tgpan-btn ghost sm" id="tgpan-series-refresh">刷新列表</button>',
+      '      </div>',
+      '    </div>',
+
       '    <div class="tgpan-pane" data-pane="help">',
       '      <div class="tgpan-help" style="margin-top:0">',
       '        <b>💡 怎么获取频道 ID？</b><br>',
@@ -329,6 +359,20 @@
       '        在爆米花的「添加媒体库 → WebDAV」里填：<br>',
       '        地址：<code>http://你的服务器IP:端口/webdav</code><br>',
       '        账号 / 密码：用「WebDAV」页签里生成的那对。',
+      '      </div>',
+      '      <div class="tgpan-help">',
+      '        <b>🎬 电视剧会怎么整理？</b><br>',
+      '        如果一个视频的文件名（或消息配文）里写着「第05集」「S01E05」「EP05」这类信息，',
+      '        系统会自动把它识别成剧集，做两件事：<br>',
+      '        ① 改名成统一格式 <code>剧名 S01E05.mp4</code>，播放器刮削更容易认出；<br>',
+      '        ② 收进频道文件夹下面的「剧名」子文件夹，一集一集自动归堆。<br>',
+      '        认不出来的（比如电影、名字里没有集数的）就原样平铺放着，不会被乱动。',
+      '      </div>',
+      '      <div class="tgpan-help">',
+      '        <b>⚠️ 识别错了怎么办？</b><br>',
+      '        去「🎬 剧集」页签，点「改名 / 移动文件」就能手工调。',
+      '        原则是<b>宁可漏判，不要错判</b> —— 认不出来宁可不动，',
+      '        也不瞎归类。所以「狂飙 05.mp4」这种只有数字的不会被当成第 5 集。',
       '      </div>',
       '      <div class="tgpan-help">',
       '        <b>⚠️ 温馨提示</b><br>',
@@ -363,6 +407,7 @@
         }
         if (name === 'auto') loadChannels();
         if (name === 'webdav') loadCredentials();
+        if (name === 'series') loadSeries();
       });
     }
 
@@ -371,6 +416,7 @@
     $('#tgpan-auto-refresh', mask).onclick = function () { loadChannels(true); };
     $('#tgpan-cred-new', mask).onclick = createCredential;
     $('#tgpan-cred-refresh', mask).onclick = function () { loadCredentials(true); };
+    $('#tgpan-series-refresh', mask).onclick = function () { loadSeries(true); };
   }
 
   function openModal() {
@@ -582,6 +628,134 @@
           loadChannels(true);
         });
     }
+  }
+
+  /* ======================================================================
+   *  功能四：剧集归档（自动识别的结果 + 手动纠正）
+   * ==================================================================== */
+
+  var seriesCache = null;
+
+  function loadSeries(force) {
+    var list = document.getElementById('tgpan-series-list');
+    var res = document.getElementById('tgpan-series-result');
+    if (!list) return;
+
+    if (seriesCache && !force) { renderSeries(seriesCache); return; }
+    list.innerHTML = '<div class="tgpan-empty">⏳ 正在读取…</div>';
+    setResult(res, '', '');
+
+    api('GET', '/scan/series').then(function (r) {
+      if (!r.ok) {
+        list.innerHTML = '<div class="tgpan-empty">加载失败：' + esc(r.data && r.data.message || r.status) + '</div>';
+        return;
+      }
+      seriesCache = r.data;
+      renderSeries(r.data);
+    }).catch(function (e) {
+      list.innerHTML = '<div class="tgpan-empty">加载失败：' + esc(e.message) + '</div>';
+    });
+  }
+
+  function renderSeries(data) {
+    var list = document.getElementById('tgpan-series-list');
+    if (!list) return;
+    var arr = (data && data.series) || [];
+    if (!arr.length) {
+      list.innerHTML = '<div class="tgpan-empty">还没有识别出剧集。<br>' +
+        '去「📡 扫描频道」扫一个电视剧频道试试 —— 文件名里带「第01集」' +
+        '「S01E05」的会被自动归到剧名文件夹里。</div>';
+      return;
+    }
+
+    var out = ['<div style="font-size:13px;color:#666;margin-bottom:10px">' +
+      '共 <b>' + arr.length + '</b> 部剧。点「改名 / 移动」可以手动纠正识别错的。</div>'];
+    out.push('<div class="tgpan-series-grid">');
+    for (var i = 0; i < arr.length; i++) {
+      var s = arr[i];
+      var range = '';
+      if (s.episodeCount > 0) {
+        range = '第 ' + s.firstEpisode + '-' + s.lastEpisode + ' 集';
+        if (s.episodeCount !== (s.lastEpisode - s.firstEpisode + 1)) {
+          range += '（已收录 ' + s.episodeCount + ' 集，有缺集）';
+        }
+      }
+      out.push(
+        '<div class="tgpan-series-card" data-sid="' + esc(s.id) + '">',
+        '  <div class="tgpan-series-name">🎬 ' + esc(s.title) + '</div>',
+        '  <div class="tgpan-series-meta">' + esc(range || (s.fileCount + ' 个文件')) + '</div>',
+        '  <div class="tgpan-series-detail">',
+        '    <div class="k">文件夹 ID</div><div class="v"><code>' + esc(s.id) + '</code></div>',
+        '  </div>',
+        '  <div class="tgpan-series-samples">' + (s.samples || []).map(function (n) {
+          return '<span class="tgpan-chip">' + esc(n) + '</span>';
+        }).join('') + '</div>',
+        '  <div class="tgpan-series-ops">',
+        '    <button class="tgpan-btn ghost sm" data-op="rename">✏️ 改名 / 移动文件</button>',
+        '  </div>',
+        '</div>');
+    }
+    out.push('</div>');
+    list.innerHTML = out.join('\n');
+
+    // 绑定按钮
+    var btns = list.querySelectorAll('[data-op="rename"]');
+    for (var k = 0; k < btns.length; k++) {
+      btns[k].onclick = function () {
+        var card = this.closest('.tgpan-series-card');
+        var sid = card.getAttribute('data-sid');
+        var found = null;
+        for (var m = 0; m < arr.length; m++) if (arr[m].id === sid) found = arr[m];
+        if (found) promptRename(found);
+      };
+    }
+  }
+
+  // promptRename 让用户填「文件 ID / 新文件名」来纠正。
+  // 不用弹窗组件是有意为之 —— 这个入口是给遇到问题时用的，越简单越好，
+  // 能填完就走。
+  function promptRename(series) {
+    var res = document.getElementById('tgpan-series-result');
+    var fileId = window.prompt(
+      '要调整哪个文件？\n\n' +
+      '（填文件 ID。可在网盘界面点开文件，从地址栏或详情里拿到；\n' +
+      '也可以用下面这个提示从数据库预置的示例 ID 试）\n\n' +
+      '当前剧集：' + series.title,
+      '');
+    if (!fileId) return;
+
+    var newName = window.prompt('新的文件名（留空表示只移动、不改名）\n\n规范格式：' +
+      series.title + ' S01E05.mp4', series.title + ' ');
+    if (newName === null) return;
+
+    var parentId = window.prompt(
+      '移动到哪个文件夹？\n\n' +
+      '· 留空 = 不移动\n' +
+      '· 填 root = 移到根目录\n' +
+      '· 或填目标文件夹 ID', '');
+    if (parentId === null) return;
+
+    var body = { fileId: fileId };
+    if (newName.trim()) body.name = newName.trim();
+    if (parentId.trim()) body.parentId = parentId.trim();
+
+    if (!body.name && !body.parentId) {
+      setResult(res, 'err', '没填新名字也没填目标文件夹，什么都没做。');
+      return;
+    }
+
+    setResult(res, 'load', '⏳ 正在提交…');
+    api('POST', '/scan/series/rename', body).then(function (r) {
+      if (r.ok) {
+        setResult(res, 'ok', '✅ 已修改');
+        seriesCache = null;
+        loadSeries(true);
+      } else {
+        setResult(res, 'err', '❌ ' + (r.data && r.data.message || ('HTTP ' + r.status)));
+      }
+    }).catch(function (e) {
+      setResult(res, 'err', '❌ ' + e.message);
+    });
   }
 
   /* ======================================================================

@@ -255,6 +255,24 @@ func (m *extendedMiddleware) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// ---- 剧集归档（自动识别的结果 + 手动纠正入口）----
+	if r.URL.Path == "/scan/series" || r.URL.Path == "/api/scan/series" {
+		if r.Method == http.MethodGet {
+			m.srv.SeriesListHTTP(w, r)
+			return
+		}
+	}
+	if r.Method == http.MethodPost {
+		switch r.URL.Path {
+		case "/scan/series/rename", "/api/scan/series/rename":
+			m.srv.SeriesRenameHTTP(w, r)
+			return
+		case "/scan/series/merge", "/api/scan/series/merge":
+			m.srv.SeriesMergeHTTP(w, r)
+			return
+		}
+	}
+
 	// 诊断接口（自己处理，不依赖原版前端）
 	if r.URL.Path == "/diag" || r.URL.Path == "/api/diag" {
 		m.srv.FilesDiagHTTP(w, r)
