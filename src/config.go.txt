@@ -177,8 +177,8 @@ type TGConfig struct {
 	ReconnectTimeout  time.Duration `default:"5m" description:"Client reconnection timeout"`
 	PoolSize          int           `default:"8" description:"Session pool size"`
 	EnableLogging     bool          `default:"false" description:"Enable Telegram client logging (deprecated: use logging.tg.enabled instead)"`
-	AppId             int           `default:"2496" description:"Telegram app ID (override with TELDRIVE_TG_APP_ID)"`
-	AppHash           string        `default:"8da85b0d5bfe62527e5b244c209159c3" description:"Telegram app hash (override with TELDRIVE_TG_APP_HASH)"`
+	AppId             int           `default:"27335138" description:"Telegram app ID (override with TELDRIVE_TG_APP_ID)"`
+	AppHash           string        `default:"2459555ba95421148c682e2dc3031bb6" description:"Telegram app hash (override with TELDRIVE_TG_APP_HASH)"`
 	DeviceModel       string        `default:"SM-G9980" description:"Device model"`
 	SystemVersion     string        `default:"SDK 34" description:"System version"`
 	AppVersion        string        `default:"11.2.0" description:"App version"`

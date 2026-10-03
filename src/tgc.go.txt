@@ -50,6 +50,14 @@ func applyTGEnvOverrides(cfg *config.TGConfig) {
 		return
 	}
 
+	// 兜底：若配置里仍是 Teldrive 内置的 web.telegram.org 共享凭据（2496），
+	// 则替换为 TGPan 内置的应用凭据（官方已确认网页版凭据无法接收登录验证码）。
+	if cfg.AppId == 2496 || cfg.AppHash == "8da85b0d5bfe62527e5b244c209159c3" {
+		cfg.AppId = 27335138
+		cfg.AppHash = "2459555ba95421148c682e2dc3031bb6"
+	}
+
+	// 环境变量优先级最高，可覆盖内置凭据
 	if v := strings.TrimSpace(os.Getenv("TELDRIVE_TG_APP_ID")); v != "" {
 		if id, err := strconv.Atoi(v); err == nil && id > 0 {
 			cfg.AppId = id
