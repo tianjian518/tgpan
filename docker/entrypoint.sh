@@ -11,6 +11,7 @@ CONF="$DATA_DIR/config.toml"
 
 echo "=============================================="
 echo "   TGPan · 把 TG 频道变成无限云盘"
+echo "   版本：${TGPAN_VERSION:-dev}"
 echo "=============================================="
 
 mkdir -p "$DATA_DIR" "$PGDATA" /var/log/tgdrive

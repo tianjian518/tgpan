@@ -1,11 +1,18 @@
 name: Build and Push
 
-# 触发条件：推 tag（如 v1.0.0）或手动触发
+# 触发条件：
+#   1. 推 tag（如 v1.1.0）—— 自动取 tag 作为版本号
+#   2. 手动触发 —— 界面上填版本号
 on:
   push:
     tags:
       - 'v*'
   workflow_dispatch:
+    inputs:
+      version:
+        description: '版本号（如 1.1.0）'
+        required: true
+        default: '1.1.0'
 
 env:
   IMAGE_NAME: tgpan
@@ -21,6 +28,23 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      # 计算版本号：tag 优先，其次手动输入
+      - name: Resolve version
+        id: ver
+        run: |
+          if [ "${{ github.event_name }}" = "push" ]; then
+            V="${GITHUB_REF_NAME#v}"
+          else
+            V="${{ github.event.inputs.version }}"
+          fi
+          echo "version=$V" >> "$GITHUB_OUTPUT"
+          MAJOR="${V%%.*}"
+          REST="${V#*.}"
+          MINOR="${REST%%.*}"
+          echo "major=$MAJOR" >> "$GITHUB_OUTPUT"
+          echo "major_minor=$MAJOR.$MINOR" >> "$GITHUB_OUTPUT"
+          echo ">> 本次构建版本：$V"
+
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
 
@@ -33,14 +57,21 @@ jobs:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
+      # 生成标签：
+      #   1.1.0  → 精确版本
+      #   1.1    → 次版本
+      #   1      → 主版本
+      #   latest → 最新
       - name: Docker metadata
         id: meta
         uses: docker/metadata-action@v5
         with:
           images: ${{ secrets.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}
           tags: |
-            type=ref,event=tag
-            type=raw,value=latest,enable={{is_default_branch}}
+            type=raw,value=${{ steps.ver.outputs.version }}
+            type=raw,value=${{ steps.ver.outputs.major_minor }}
+            type=raw,value=${{ steps.ver.outputs.major }}
+            type=raw,value=latest
 
       - name: Build and push (amd64 + arm64)
         uses: docker/build-push-action@v6
@@ -51,5 +82,7 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            TGPAN_VERSION=${{ steps.ver.outputs.version }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
