@@ -185,7 +185,20 @@ func (a *apiService) AuthWs(ctx context.Context) error {
 }
 
 func (e *extendedService) AuthWs(w http.ResponseWriter, r *http.Request) {
-	ctx := r.Context()
+	// ---------------------------------------------------------------------
+	//  【重要】这里不能直接用 r.Context()！
+	//
+	//  r.Context() 是 HTTP 请求的上下文，WebSocket 场景下它是「不可靠」的：
+	//  一旦 HTTP handler 返回（或代理/网关认为请求结束），r.Context() 就会
+	//  被 cancel。此时所有拿这个 ctx 发起的 TG 调用（比如 SendCode 发验证码）
+	//  都会在到达 Telegram 之前被中断。
+	//
+	//  症状：点了登录，前端转圈，TG 那边收不到任何请求 —— 验证码自然收不到。
+	//
+	//  正确做法：自己建一个 context，只在「WebSocket 连接断开」时取消。
+	// ---------------------------------------------------------------------
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 
 	upgrader := websocket.Upgrader{
 		CheckOrigin: func(r *http.Request) bool {
@@ -239,6 +252,7 @@ func (e *extendedService) AuthWs(w http.ResponseWriter, r *http.Request) {
 
 	// 读消息循环：独立 goroutine，不受 TG 连接状态影响
 	go func() {
+		defer cancel() // 连接断开 → 取消 ctx，释放 TG 连接与所有在途请求
 		for {
 			message := &types.SocketMessage{}
 			if err := conn.ReadJSON(message); err != nil {

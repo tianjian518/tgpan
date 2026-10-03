@@ -209,6 +209,20 @@ func (m *extendedMiddleware) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		m.srv.FilesScanChannelHTTP(w, r)
 		return
 	}
+	// 诊断接口（自己处理，不依赖原版前端）
+	if r.URL.Path == "/diag" || r.URL.Path == "/api/diag" {
+		m.srv.FilesDiagHTTP(w, r)
+		return
+	}
+	if r.URL.Path == "/diag.json" || r.URL.Path == "/api/diag.json" {
+		m.srv.FilesDiagJSON(w, r)
+		return
+	}
+	// 登录链路自检：真实跑一次「请求验证码」，把每步结果摊在网页上
+	if r.URL.Path == "/logincheck" || r.URL.Path == "/api/logincheck" {
+		m.srv.FilesLoginCheckHTTP(w, r)
+		return
+	}
 
 	// 注意：不要在这里"补 /api 前缀"！
 	// ogen 的路由表内部已按 servers.url = "{url}/api" 处理，直接传 r.URL.Path 即可。

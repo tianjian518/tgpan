@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/gotd/td/telegram"
@@ -146,6 +147,24 @@ func (e *extendedService) runDiagnostics(ctx context.Context) []diagCheck {
 		}
 	}
 
+	// ---- 2.5 对照组：普通 HTTPS 网站能否访问 ----
+	// 作用：把「整台机器没网」和「只有 TG 连不上」区分开。
+	// 如果这一项 ✅ 而 TG 相关项 ❌，说明网络本身是好的，是 TG 这条路被单独挡了。
+	{
+		t0 := time.Now()
+		cli := &http.Client{Timeout: 8 * time.Second}
+		req, _ := http.NewRequestWithContext(ctx, http.MethodGet, "https://core.telegram.org/", nil)
+		resp, err := cli.Do(req)
+		if err != nil {
+			out = append(out, diagCheck{"对照：访问 core.telegram.org 网页", false,
+				"失败：" + short(err.Error()) + "（说明服务器整体网络不通，不只是 TG 协议问题）", ms(t0)})
+		} else {
+			_ = resp.Body.Close()
+			out = append(out, diagCheck{"对照：访问 core.telegram.org 网页", true,
+				fmt.Sprintf("HTTP %d（普通网页能打开，说明网络本身正常）", resp.StatusCode), ms(t0)})
+		}
+	}
+
 	// ---- 3. TCP 直连 Telegram 数据中心 ----
 	dcsToTry := []struct{ name, addr string }{
 		{"DC1 (149.154.175.50)", "149.154.175.50:443"},
@@ -192,17 +211,10 @@ func (e *extendedService) testMTProto(ctx context.Context) (bool, string) {
 	}
 
 	var callErr error
-	var needsAuth bool
 
 	runErr := client.Run(cctx, func(ctx context.Context) error {
 		// 调用一个无需登录的接口，验证通道确实可用
 		_, callErr = client.API().HelpGetConfig(ctx)
-		if callErr != nil {
-			// 有些版本会返回未授权，这也说明「通道通了」
-			if errMsg := callErr.Error(); len(errMsg) > 0 {
-				needsAuth = true
-			}
-		}
 		return nil
 	})
 
@@ -211,10 +223,16 @@ func (e *extendedService) testMTProto(ctx context.Context) (bool, string) {
 			"（这是登录卡住/验证码收不到的直接原因）"
 	}
 	if callErr != nil {
-		if needsAuth {
-			return true, "通道已建立（接口返回：" + short(callErr.Error()) + "）"
+		// 只有「通道确实建立、只是没登录」造成的错误才算通过。
+		// gotd 在真正握手成功但未授权时返回的错误包含这些关键字。
+		msg := callErr.Error()
+		if strings.Contains(msg, "AUTH_KEY") ||
+			strings.Contains(msg, "not authorized") ||
+			strings.Contains(msg, "AUTH_KEY_UNREGISTERED") ||
+			strings.Contains(msg, "not logged in") {
+			return true, "通道已建立（接口返回未授权，属正常现象）"
 		}
-		return false, "调用失败：" + short(callErr.Error())
+		return false, "调用失败：" + short(msg)
 	}
 	return true, "连接正常，TG 接口调用成功"
 }
