@@ -247,7 +247,22 @@ func (e *extendedService) AuthWs(w http.ResponseWriter, r *http.Request) {
 	//  改成并行：读取循环立刻开跑，TG 连接在后台进行，并把进度实时推给前端。
 	// ---------------------------------------------------------------------
 
-	// ready 标记 TG 连接是否就绪（并发读写，用 atomic）
+	// ---------------------------------------------------------------------
+	//  ready 标记：只用于「状态提示」，绝不拦截消息！
+	//
+	//  教训（v1.2.0 的严重设计错误）：
+	//  曾经写成——TG 未就绪时直接丢弃消息并回错误。结果是：
+	//    1. 前端页面加载会立刻发 {"authType":"qr"}，那时 TG 通常还没连上，
+	//       这条消息被丢弃；
+	//    2. 用户很快点登录发的 sendcode，也可能赶上 ready 仍为 false 而被丢弃；
+	//    3. 前端只把 {"type":"error"} 当 toast 显示，不会重置按钮的 isLoading，
+	//       于是按钮永远卡在加载态 —— 表现为「点了没有任何反应」。
+	//
+	//  正确做法：消息一律交给对应的 handler。tgClient 内部会自行排队等待
+	//  连接就绪，不需要我们在外面拦。
+	// ---------------------------------------------------------------------
+
+	// ready 标记 TG 连接是否就绪（仅用于状态展示，不参与拦截逻辑）
 	var ready atomic.Bool
 
 	// 读消息循环：独立 goroutine，不受 TG 连接状态影响
@@ -262,14 +277,13 @@ func (e *extendedService) AuthWs(w http.ResponseWriter, r *http.Request) {
 				}
 				return
 			}
-			// TG 还没连上就发起了操作 → 明确告诉前端，别让它干等
-			if !ready.Load() && message.AuthType != "" {
-				_ = conn.WriteJSON(map[string]any{
-					"type":    "error",
-					"message": "尚未连接到 Telegram，请稍候重试（服务器正在建立连接）",
-				})
-				continue
-			}
+			logger.Info("auth.ws_message_received",
+				zap.String("auth_type", message.AuthType),
+				zap.String("message", message.Message),
+				zap.Bool("tg_ready", ready.Load()),
+				zap.Bool("has_phone", message.PhoneNo != ""))
+
+			// 一律交给 handler 处理（不拦截）
 			switch message.AuthType {
 			case "qr":
 				go e.handleQRAuth(ctx, conn, tgClient, loggedIn, sessionStorage, logger)
