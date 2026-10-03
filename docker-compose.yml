@@ -11,6 +11,21 @@ services:
       - ./data:/data
     environment:
       - TZ=Asia/Shanghai
+      # ================================================================
+      #  【强烈建议填写】你自己的 Telegram 应用凭据
+      #  在 https://my.telegram.org/apps 免费申请（用电脑浏览器打开）
+      #  填上后可显著提高登录时验证码的投递成功率
+      # ================================================================
+      # - TELDRIVE_TG_APP_ID=1234567
+      # - TELDRIVE_TG_APP_HASH=0123456789abcdef0123456789abcdef
+      #
+      # 可选：自定义设备身份（一般不用改）
+      # - TELDRIVE_TG_DEVICE_MODEL=SM-G9980
+      # - TELDRIVE_TG_SYSTEM_VERSION=SDK 34
+      # - TELDRIVE_TG_APP_VERSION=11.2.0
+      #
+      # 设为 0 可关闭「真实设备身份」，回到原版网页版伪装行为
+      # - TELDRIVE_TG_REAL_DEVICE=0
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8080/api/version"]
       interval: 30s
