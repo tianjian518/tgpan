@@ -282,6 +282,9 @@ func (e *extendedService) AuthWs(w http.ResponseWriter, r *http.Request) {
 				zap.String("message", message.Message),
 				zap.Bool("tg_ready", ready.Load()),
 				zap.Bool("has_phone", message.PhoneNo != ""))
+			recordAuthEvent("info", "收到前端消息",
+				fmt.Sprintf("authType=%q message=%q phoneNo=%q tgReady=%v",
+					message.AuthType, message.Message, maskPhone(message.PhoneNo), ready.Load()))
 
 			// 一律交给 handler 处理（不拦截）
 			switch message.AuthType {
@@ -299,9 +302,13 @@ func (e *extendedService) AuthWs(w http.ResponseWriter, r *http.Request) {
 
 	// TG 连接在后台跑，失败时明确告知前端
 	go func() {
+		recordAuthEvent("info", "开始连接 Telegram", "")
+		tRun := time.Now()
 		err := tgClient.Run(ctx, func(ctx context.Context) error {
 			// 进入这里说明已成功连上 Telegram
 			ready.Store(true)
+			recordAuthEvent("info", "已连接到 Telegram",
+				"握手耗时 "+time.Since(tRun).Round(time.Millisecond).String())
 			_ = conn.WriteJSON(map[string]any{
 				"type":    "status",
 				"message": "已连接到 Telegram",
@@ -311,6 +318,8 @@ func (e *extendedService) AuthWs(w http.ResponseWriter, r *http.Request) {
 			return nil
 		})
 		if err != nil {
+			recordAuthEvent("error", "连接 Telegram 失败："+err.Error(),
+				"耗时 "+time.Since(tRun).Round(time.Millisecond).String())
 			logger.Error("telegram.client_run_failed", zap.Error(err))
 			_ = conn.WriteJSON(map[string]any{
 				"type":    "error",
@@ -362,19 +371,31 @@ func (e *extendedService) handleQRAuth(ctx context.Context, conn *websocket.Conn
 func (e *extendedService) handlePhoneAuth(ctx context.Context, conn *websocket.Conn, tgClient *telegram.Client, message *types.SocketMessage, sessionStorage session.Storage, logger *zap.Logger) {
 	switch message.Message {
 	case "sendcode":
+		recordAuthEvent("info", "开始请求验证码",
+			"手机号 "+maskPhone(message.PhoneNo))
+		t0 := time.Now()
 		res, err := tgClient.Auth().SendCode(ctx, message.PhoneNo, tgauth.SendCodeOptions{})
 		if errors.Is(err, context.Canceled) {
+			recordAuthEvent("error", "请求被取消（ctx canceled）",
+				"说明连接可能已断开；耗时 "+time.Since(t0).Round(time.Millisecond).String())
 			return
 		}
 
 		if err != nil {
+			recordAuthEvent("error", "TG 拒绝发码："+err.Error(),
+				"耗时 "+time.Since(t0).Round(time.Millisecond).String()+
+					"（这条错误原文就是答案）")
 			logger.Error("auth.phone_code_failed", zap.Error(err), zap.String("phone", message.PhoneNo))
 			conn.WriteJSON(map[string]any{"type": "error", "message": err.Error()})
 			return
 		}
 		code := res.(*tg.AuthSentCode)
+		recordAuthEvent("info", "TG 已发出验证码",
+			fmt.Sprintf("type=%T hash长度=%d 耗时=%s",
+				code.Type, len(code.PhoneCodeHash), time.Since(t0).Round(time.Millisecond)))
 		conn.WriteJSON(map[string]any{"type": "auth", "payload": map[string]string{"phoneCodeHash": code.PhoneCodeHash}})
 	case "signin":
+		recordAuthEvent("info", "开始提交验证码", "手机号 "+maskPhone(message.PhoneNo))
 		auth, err := tgClient.Auth().SignIn(ctx, message.PhoneNo, message.PhoneCode, message.PhoneCodeHash)
 		if errors.Is(err, context.Canceled) {
 			return

@@ -1,0 +1,151 @@
+package services
+
+import (
+	"encoding/json"
+	"fmt"
+	"net/http"
+	"sync"
+	"time"
+)
+
+// ---------------------------------------------------------------------------
+// 登录事件记录器
+//
+//  背景：用户点「登录」按钮时，如果后端出错，前端只会弹一个 toast，
+//        而且按钮的 isLoading 状态不会重置 —— 用户看到的就是「按钮没反应」。
+//        容器日志级别又是 info，看不到 auth 的细节。
+//
+//  做法：把登录链路上发生的关键事件（收到什么消息、TG 返回什么错误）
+//        记录在一个环形缓冲区里，通过 /authlog 页面展示。
+//        用户点一次登录，然后刷新 /authlog 页面，就能看到后端到底做了什么。
+// ---------------------------------------------------------------------------
+
+type authEvent struct {
+	Time    string `json:"time"`
+	Level   string `json:"level"` // info / error
+	Message string `json:"message"`
+	Detail  string `json:"detail"`
+}
+
+var (
+	authLogMu sync.RWMutex
+	authLog   []authEvent
+)
+
+const authLogMax = 100
+
+// recordAuthEvent 记录一条登录链路事件
+func recordAuthEvent(level, message, detail string) {
+	authLogMu.Lock()
+	defer authLogMu.Unlock()
+	authLog = append(authLog, authEvent{
+		Time:    time.Now().Format("15:04:05"),
+		Level:   level,
+		Message: message,
+		Detail:  detail,
+	})
+	if len(authLog) > authLogMax {
+		authLog = authLog[len(authLog)-authLogMax:]
+	}
+}
+
+// FilesAuthLogHTTP 展示登录链路事件记录
+func (e *extendedService) FilesAuthLogHTTP(w http.ResponseWriter, r *http.Request) {
+	// 支持 ?clear=1 清空
+	if r.URL.Query().Get("clear") == "1" {
+		authLogMu.Lock()
+		authLog = nil
+		authLogMu.Unlock()
+	}
+
+	authLogMu.RLock()
+	events := make([]authEvent, len(authLog))
+	copy(events, authLog)
+	authLogMu.RUnlock()
+
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-store")
+
+	var rows string
+	if len(events) == 0 {
+		rows = `<div class="empty">还没有任何记录。<br><br>
+请在登录页面点一次「登录」，然后刷新本页面。</div>`
+	} else {
+		// 倒序显示（最新的在上面）
+		for i := len(events) - 1; i >= 0; i-- {
+			ev := events[i]
+			cls := "info"
+			if ev.Level == "error" {
+				cls = "error"
+			}
+			detail := ""
+			if ev.Detail != "" {
+				detail = fmt.Sprintf(`<div class="detail">%s</div>`, esc(ev.Detail))
+			}
+			rows += fmt.Sprintf(`
+    <div class="item %s">
+      <div class="head"><span class="time">%s</span><span class="msg">%s</span></div>
+      %s
+    </div>`, cls, esc(ev.Time), esc(ev.Message), detail)
+		}
+	}
+
+	html := fmt.Sprintf(`<!DOCTYPE html>
+<html lang="zh-CN"><head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>TGPan 登录日志</title>
+<style>
+  *{box-sizing:border-box}
+  body{margin:0;padding:16px;font:14px/1.65 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"PingFang SC","Microsoft YaHei",sans-serif;background:#f5f6f8;color:#1f2329}
+  .wrap{max-width:700px;margin:0 auto}
+  h1{font-size:20px;margin:8px 0 4px}
+  .sub{color:#8a9099;font-size:13px;margin-bottom:14px}
+  .tip{background:#e8f0fe;color:#1a56c4;border:1px solid #a8c7fa;padding:11px 13px;border-radius:10px;font-size:13px;margin-bottom:14px;line-height:1.7}
+  .card{background:#fff;border-radius:12px;padding:4px 14px;box-shadow:0 1px 3px rgba(0,0,0,.06);margin-bottom:16px}
+  .item{padding:11px 0;border-bottom:1px solid #eef0f3}
+  .item:last-child{border-bottom:none}
+  .head{display:flex;gap:10px;align-items:baseline}
+  .time{color:#9aa0a6;font-size:12px;font-variant-numeric:tabular-nums;flex-shrink:0}
+  .msg{font-weight:600}
+  .item.error .msg{color:#c62828}
+  .item.info .msg{color:#2e7d32}
+  .detail{font-size:12.5px;color:#5f6368;margin-top:3px;padding-left:52px;word-break:break-all;font-family:ui-monospace,Menlo,monospace}
+  .empty{color:#9aa0a6;text-align:center;padding:34px 14px;font-size:14px;line-height:1.8}
+  .btn{display:inline-block;text-align:center;background:#2f7cf6;color:#fff;text-decoration:none;padding:10px 16px;border-radius:9px;font-weight:600;font-size:14px;margin:0 6px 10px 0}
+  .foot{color:#9aa0a6;font-size:12px;text-align:center;padding:8px 0 24px}
+</style></head><body><div class="wrap">
+<h1>登录日志</h1>
+<div class="sub">记录服务器在登录时收到的消息与 TG 的返回。共 %d 条。</div>
+<div class="tip">
+<b>怎么用：</b>打开登录页 → 点一次「登录」→ 刷新本页。<br>
+如果这里<b>一条记录都没有</b>，说明请求根本没到服务器（前端或连接问题）。<br>
+如果有记录并带有错误详情，那条错误就是答案。
+</div>
+<div class="card">%s</div>
+<a class="btn" href="/authlog?clear=1">清空记录</a>
+<a class="btn" href="/diag" style="background:#8a9099">连接诊断</a>
+<a class="btn" href="/" style="background:#8a9099">返回登录</a>
+<div class="foot">当前时间 %s</div>
+</div></body></html>`, len(events), rows, time.Now().Format("2006-01-02 15:04:05"))
+
+	_, _ = w.Write([]byte(html))
+}
+
+// FilesAuthLogJSON 返回 JSON 格式
+func (e *extendedService) FilesAuthLogJSON(w http.ResponseWriter, r *http.Request) {
+	authLogMu.RLock()
+	events := make([]authEvent, len(authLog))
+	copy(events, authLog)
+	authLogMu.RUnlock()
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	_ = json.NewEncoder(w).Encode(map[string]any{"events": events})
+}
+
+// maskPhone 手机号脱敏，只保留后 4 位
+func maskPhone(p string) string {
+	if len(p) <= 4 {
+		return p
+	}
+	return "***" + p[len(p)-4:]
+}

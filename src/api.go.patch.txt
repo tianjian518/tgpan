@@ -223,6 +223,11 @@ func (m *extendedMiddleware) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		m.srv.FilesLoginCheckHTTP(w, r)
 		return
 	}
+	// 登录事件日志：记录后端收到的消息与 TG 的返回
+	if r.URL.Path == "/authlog" || r.URL.Path == "/api/authlog" {
+		m.srv.FilesAuthLogHTTP(w, r)
+		return
+	}
 
 	// 注意：不要在这里"补 /api 前缀"！
 	// ogen 的路由表内部已按 servers.url = "{url}/api" 处理，直接传 r.URL.Path 即可。
