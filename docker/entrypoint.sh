@@ -14,7 +14,23 @@ echo "   TGPan · 把 TG 频道变成无限云盘"
 echo "=============================================="
 
 mkdir -p "$DATA_DIR" "$PGDATA" /var/log/tgdrive
-# 数据库目录属主必须是 postgres；其余数据目录保持 root 以便写配置
+
+# ---------------------------------------------------------------------------
+#  权限处理（关键，踩过的坑）
+#
+#  背景：容器里 postgres 用户要去 /data/postgres 初始化数据库，
+#        但它必须先能「走进」父目录 /data。
+#        挂载进来的目录通常属主 root、mode 700，postgres 会被挡在门外：
+#          initdb: error: could not access directory "/data/postgres": Permission denied
+#
+#  处理：给父目录加 o+x（其他人可进入）。目录内文件仍受各自权限约束，不会泄露。
+#        若失败（如只读挂载、特殊文件系统），打印警告但不中断。
+# ---------------------------------------------------------------------------
+if ! chmod o+x "$DATA_DIR" 2>/dev/null; then
+  echo "[warn] 无法修改 $DATA_DIR 权限，若后续报 Permission denied，请手动执行："
+  echo "       chmod 755 <你映射到 /data 的主机目录>"
+fi
+# 数据库目录属主必须是 postgres，才能初始化
 chown -R postgres:postgres "$PGDATA" 2>/dev/null || true
 
 # ---- PostgreSQL 初始化（仅首次）----
