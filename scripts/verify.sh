@@ -76,6 +76,31 @@ curl -s -o /dev/null -w "    HTTP %{http_code}\n" "$BASE/api/webdav/credentials"
 echo "    新增 API /api/scan/channels（未登录期望 401 JSON）→"
 curl -s -o /dev/null -w "    HTTP %{http_code}\n" "$BASE/api/scan/channels"
 
+echo "    剧集列表 /api/scan/series（未登录期望 401 JSON）→"
+curl -s -o /dev/null -w "    HTTP %{http_code}\n" "$BASE/api/scan/series"
+
+echo "    剧集改名 /api/scan/series/rename（未登录期望 401 JSON）→"
+curl -s -o /dev/null -w "    HTTP %{http_code}\n" -X POST \
+  -H 'Content-Type: application/json' -d '{}' "$BASE/api/scan/series/rename"
+
+echo
+echo "    剧集页签是否已嵌入前端 →"
+if curl -s "$BASE/tgpan-scan.js" | grep -q 'data-tab="series"'; then
+  echo "    ✅ 找到「🎬 剧集」页签"
+else
+  echo "    ❌ 前端控制台里没有剧集页签，检查 ui/dist/tgpan-scan.js 是否已嵌入"
+  exit 1
+fi
+
+echo
+echo "==> 6. 剧集识别引擎自测（不依赖网络）"
+echo "    在容器内跑单元测试…"
+if docker exec "$CONTAINER" sh -c 'command -v go >/dev/null 2>&1' 2>/dev/null; then
+  docker exec "$CONTAINER" sh -c 'cd /app && go test ./pkg/services/ -run "Episode|Resolve|Caption|ChineseNum" 2>&1' | sed 's/^/    /'
+else
+  echo "    （运行镜像里没有 Go 工具链，跳过 —— 属正常，源码目录已附独立测试）"
+fi
+
 echo
 echo "✅ 验证完成！浏览器访问 $BASE"
 echo "   WebDAV 挂载地址：$BASE/webdav"
