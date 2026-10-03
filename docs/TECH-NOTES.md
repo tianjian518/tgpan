@@ -1,165 +1,290 @@
 # TGPan —— 技术验证记录
 
-> 这份文档记录项目落地前**实测**出来的关键事实，避免基于错误假设开发。
+> 记录项目落地前**实测**出来的关键事实，避免基于错误假设开发。
 
-## 一、核心发现：Alist / OpenList 的 TG 支持情况
+---
+
+## 一、选型：Alist / OpenList / Teldrive 的 TG 支持情况
 
 | 项目 | 版本 | Telegram 驱动 | 结论 |
 |---|---|---|---|
 | **Alist** | v3.41.0（实测） | ❌ 无（70 个驱动全查过） | **不能直连 TG** |
-| **OpenList** | v4.2.6（实测） | ✅ **有 `Teldrive` 驱动**（93 个驱动） | **可以，方案成立** |
+| **OpenList** | v4.2.6（实测） | ✅ 有 `Teldrive` 驱动（93 个驱动） | 可连接，但需另起 Teldrive 服务 |
+| **Teldrive** | v1.8.3 | ✅ 自身就是完整 TG 网盘 | **最终采用** |
 
-> 网上流传的"Alist 挂 TG 频道"是误传；真正能连 TG 的是 **Teldrive**，OpenList 把它做成了原生驱动。
+> 网上流传的「Alist 挂 TG 频道」是误传；真正能连 TG 的是 **Teldrive**。
+> OpenList 只是把它做成了一个连接器（前端），本项目不需要，直接单镜像跑 Teldrive。
 
-## 二、最终架构（实测确认）
+---
+
+## 二、最终架构
 
 ```
-┌──────────────────────────────────────────────────────┐
-│  单个 Docker 镜像 tgpan                            │
-│                                                       │
-│  ┌─────────────┐   ┌──────────────┐   ┌───────────┐  │
-│  │ Teldrive    │◀──│ OpenList      │◀──│ 前端       │  │
-│  │ (Go)        │原生│ (Teldrive     │   │ 百度网盘风 │  │
-│  │ 连TG/切片   │驱动│  驱动)        │   │ +设置页    │  │
-│  │ 302 直链    │   │ WebDAV/文件列表│   │           │  │
-│  └──────┬──────┘   └──────────────┘   └───────────┘  │
-│         │                                             │
-│  ┌──────▼──────┐                                      │
-│  │ PostgreSQL  │  ← 必须带 pgroonga 扩展              │
-│  │ (定制品)     │                                      │
-│  └─────────────┘                                      │
-└──────────┬───────────────────────────────────────────┘
-           │ MTProto
-     Telegram 服务器
+┌──────────────────────────────────────────────────────────┐
+│  单个 Docker 镜像 tgpan                                   │
+│                                                           │
+│  ┌──────────────────────────────┐   ┌──────────────────┐ │
+│  │ Teldrive v1.8.3 (Go, 静态)   │◀──│ PostgreSQL 17    │ │
+│  │  · 连 TG / 文件切片 / 302    │   │ + pgroonga 扩展  │ │
+│  │  · Web UI (embed 进二进制)   │   │ :5432            │ │
+│  │  · REST API + WebDAV         │   └──────────────────┘ │
+│  │  · 【改造】频道扫描           │                        │
+│  │ :8080                        │                        │
+│  └──────────┬───────────────────┘                        │
+└─────────────┼────────────────────────────────────────────┘
+              │ MTProto
+       Telegram 服务器
 ```
 
-## 三、Teldrive 真实技术参数（读源码确认）
+---
 
-### 3.1 版本与来源
-- 仓库：`github.com/tgdrive/teldrive`，**3095 star**，Go 语言，未归档
-- 实测版本：**v1.8.3**
-- 官方镜像：`ghcr.io/tgdrive/teldrive`
-- 官方数据库镜像：**`ghcr.io/tgdrive/postgres:17-alpine`**（定制版，含 pgroonga）
+## 三、核心机制：Teldrive 是怎么存/取文件的
 
-### 3.2 API 结构（源码 `pkg/services/api.go` + 各 service 确认）
+理解这一点，才能理解「频道扫描」为什么可行。
 
-API 统一挂在 **`/api/`** 前缀下，认证用 **JWT Cookie**。
+### 3.1 数据结构
 
-**认证（`pkg/services/auth.go`）**
-| 操作 | 说明 |
-|---|---|
-| `AuthLogin` | 登录，返回 JWT |
-| `AuthLogout` | 登出 |
-| `AuthSession` | 查询会话 |
-| `AuthWs` | **WebSocket 登录**（用 TG session 走 WS 拿 token） |
-
-**文件（`pkg/services/file.go`）**
-| 操作 | 说明 |
-|---|---|
-| `FilesList` | 列目录 |
-| `FilesCreate` | 新建 |
-| `FilesMkdir` | 建文件夹 |
-| `FilesMove` | 移动 |
-| `FilesCopy` | 复制 |
-| `FilesDelete` | 删除 |
-| `FilesGetById` | 按 ID 取文件 |
-| `FilesUpdate` | 重命名/更新 |
-| `FilesCategoryStats` | 分类统计（图片/视频/文档…） |
-| **`FilesStream`** | **文件流式读取 —— 播放就靠它** |
-| `FilesCreateShare` | 创建分享 |
-| `SharesStream` | 分享文件流 |
-
-**上传（`pkg/services/upload.go`）**
-| 操作 | 说明 |
-|---|---|
-| `UploadsUpload` | 上传（分片） |
-| `UploadsPartsById` | 分片上传 |
-| `UploadsStats` | 上传统计 |
-| `UploadsDelete` | 取消上传 |
-
-**用户/频道（`pkg/services/user.go`）**
-| 操作 | 说明 |
-|---|---|
-| `UsersListChannels` | **列出频道 —— 前端"频道文件夹"用这个** |
-| `UsersCreateChannel` | 创建频道 |
-| `UsersUpdateChannel` | 更新频道 |
-| `UsersDeleteChannel` | 删除频道 |
-| `UsersSyncChannels` | 同步频道 |
-| `UsersListSessions` | 列出登录会话 |
-| `UsersStats` | 用户统计（容量等） |
-| `UsersAddBots` / `UsersRemoveBots` | Bot 管理 |
-| `UsersProfileImage` | 头像 |
-
-### 3.3 配置文件（`config.sample.toml` 实测）
-
-关键字段：
-```toml
-[db]
-data-source = 'postgres://user:pass@host:5432/db?sslmode=disable'
-
-[jwt]
-secret = '随机字符串'
-session-time = '30d'
-
-[server]
-port = 8080
-
-[tg]
-app-id = <从 my.telegram.org 申请>
-app-hash = '<32位hash>'
-auto-channel-create = true        # 自动建频道
-channel-limit = 500000            # 频道容量上限
-rate-limit = true                 # 限流保护（防封）
-pool-size = 8
-
-[tg.session]
-type = 'postgres'                 # session 存数据库，重启不丢
-key = 'session'
-
-[tg.stream]
-buffers = 8
-concurrency = 1
-
-[tg.uploads]
-# 上传并发等
+```
+teldrive.files 表（元数据账本）
+┌──────────────────────────────────────────────────────────┐
+│ id          text    文件唯一 ID（gen_random_uuid）        │
+│ name        text    文件名                               │
+│ type        text    file / folder                        │
+│ size        bigint  原始大小（字节）                       │
+│ channel_id  bigint  存在哪个 TG 频道（裸 ID，不带 -100）   │
+│ parts       jsonb   [{"id": <消息ID>, "salt": "..."}]     │
+│ encrypted   bool    是否加密                             │
+│ parent_id   text    父文件夹 ID                           │
+│ status      text    active / pending_deletion            │
+└──────────────────────────────────────────────────────────┘
 ```
 
-### 3.4 数据库硬依赖
+### 3.2 读取流程（播放时）
 
-⚠️ **Teldrive 强依赖 PostgreSQL 的 `pgroonga` 全文搜索扩展**：
 ```
-CREATE EXTENSION IF NOT EXISTS pgroonga;   -- 迁移脚本 20240711163538_search.sql
+用户点播放
+    ↓
+查 files 表 → 拿 channel_id + parts[0].id
+    ↓
+tgc.GetMessages(ctx, api, ids, channel_id)   ← 注意 channel_id 是裸 ID
+    ↓
+TG 返回该消息的 document
+    ↓
+tgc.GetLocation() → document.AsInputDocumentFileLocation()
+    ↓
+upload.getFile 拉流（带 offset/limit → 支持拖进度条）
+    ↓
+返回给播放器
 ```
-普通 `postgres:16-alpine` **不带此扩展**，迁移会失败。**必须用 `ghcr.io/tgdrive/postgres:17-alpine`**。
 
-## 四、302 支持（解决"卡"的关键）
+> **关键结论**：Teldrive 是「按账本取文件」。
+> 频道里躺着的消息，只要没登记进 `files` 表，Teldrive 就完全不知道它存在。
 
-OpenList 的 Teldrive 驱动字段（实测）：
-- `webdav_policy` 默认值 **`302_redirect`** ✅
-- `use_share_link` — 创建分享链接以支持 302
-- `chunk_size` 默认 10 MiB — 大文件自动分片，突破 TG 2GB 单文件限制
-- `upload_concurrency` 默认 4
+### 3.3 写入流程（上传时）
 
-> 意味着：**播放器可以直连 TG 拿数据，不经过你的服务器转发**。这解决了之前方案里"数据必须过服务器带宽"的死结。
+```
+用户上传 10GB 电影
+    ↓
+按 512KB 切片（uploader.WithPartSize(512*1024)）
+    ↓
+每片作为一条独立 TG 消息发进存储频道（带文件名标记）
+    ↓
+记录进 teldrive.uploads 表（part_id = 消息ID, part_no = 序号）
+    ↓
+全部传完 → 汇总写一行 teldrive.files（parts = 所有片的消息ID）
+```
 
-## 五、必须遵守的 Telegram 限制（官方 README 警告）
+### 3.4 加密机制（本项目扫描时不使用）
 
-> "You will be banned instantly if you misuse telegram API."
-> "Your files will be removed from telegram servers if you try to abuse the service."
+Teldrive 可选加密（`tg.uploads.encryption-key`）：
 
-- **禁止滥用**：大量并发请求、疯狂刷频道会**立即封号**
-- **禁止数据囤积**（data hoarding）：违规会导致**频道被清空**
-- 必须遵守 TG API 频率限制
+- 文件头：魔数 `TELDRIVE\x00\x00`（8 字节）+ 24 字节 nonce
+- 数据按 64KB 一块，`secretbox` 密封，每块头 16 字节
+- 密钥：`scrypt(password, salt)` 派生（N=16384, r=8, p=1）
 
-**因此：`rate-limit = true` 必须保持开启。建议用小号。**
+**扫描导入的文件一律 `encrypted = false`**，原因：
 
-## 六、端口规划
+1. 频道里现成的视频是**原始文件**，没有 Teldrive 的加密头
+2. 若标记为加密，解密器校验魔数会失败（`ErrorEncryptedBadMagic`）
+3. 不加密时 `parts` 只需 `id`，Teldrive 直接读原始 document 流
 
-| 端口 | 服务 |
+---
+
+## 四、本项目做的改造：频道扫描
+
+### 4.1 需求
+
+把 TG 频道里**已有的**视频（包括别人发的），直接变成网盘里能播的文件。
+Teldrive 原生不支持 —— 它只认自己上传时登记的文件。
+
+### 4.2 实现
+
+新增 `pkg/services/channelscan.go`：
+
+```
+1. 用登录的 TG 账号解析频道（tgc.GetChannelById）
+2. 分页翻历史消息（messages.getHistory，每页 100 条，用 OffsetID 翻页）
+3. 逐条判断：
+   - MessageMediaDocument + DocumentAttributeVideo → 是视频
+   - 大小 >= MinSize（默认 1MB，过滤封面小图）
+4. 组装 files 记录：
+   - channel_id = 频道裸 ID
+   - parts = [{"id": <消息ID>}]
+   - encrypted = false
+   - size = document.Size
+5. 建文件夹（用频道标题命名），文件挂进去
+6. 批量写入（CreateInBatches，每批 200）
+```
+
+### 4.3 去重
+
+扫描前先查该频道下已登记的所有 `parts[].id`，已存在则跳过。
+**重复扫描同一频道不会重复导入。**
+
+### 4.4 限流保护
+
+- 每页之间 sleep 300ms
+- 遇到 `FLOOD_WAIT` 自动等待（<=120s 自动重试，超过则报错）
+- 默认 limit 2000 条消息
+- 沿用 Teldrive 的 `rate-limit = true`
+
+---
+
+## 五、API
+
+### 自定义接口
+
+```
+POST /api/scan/channel
+Cookie: teldrive=<jwt>
+
+{
+  "channelId": -1001234567890,   // 必填，支持 -100 前缀或裸 ID
+  "folderName": "我的电影",       // 选填，默认用频道标题
+  "parentId": "",                // 选填，挂到哪个目录
+  "limit": 2000,                 // 选填，最多扫多少条消息
+  "minSize": 1048576             // 选填，最小文件字节数
+}
+```
+
+响应：
+
+```json
+{
+  "channelId": 1234567890,
+  "channelName": "某某电影频道",
+  "folderId": "uuid...",
+  "folderName": "某某电影频道",
+  "scanned": 1523,
+  "imported": 87,
+  "skipped": 1436,
+  "totalSize": 214748364800,
+  "message": "扫描了 1523 条消息，新导入 87 个视频，共 200.00 GB"
+}
+```
+
+### ⚠️ 路由注册的坑（实测踩到）
+
+`cmd/run.go` 里是：
+
+```go
+mux.Mount("/api/", http.StripPrefix("/api", extendedSrv))
+```
+
+**`/api` 前缀被 StripPrefix 剥掉了**，所以进到 `extendedMiddleware.ServeHTTP` 时
+`r.URL.Path` 是 `/scan/channel`，**不是** `/api/scan/channel`。
+
+第一次按 `/api/scan/channel` 判断 → 直接 404。修正为两种都兼容。
+
+> 不走 ogen 路由表的原因：改 openapi 规范要重新跑 ogen 生成代码，
+> 而在 `extendedMiddleware` 里前置拦截更轻量（`AuthWs`、`FilesStream` 也是这么做的）。
+
+---
+
+## 六、前端改造
+
+Teldrive 官方 UI 是**打包产物**（从 GitHub Release 下载），不重新构建，
+改为**注入一个独立 JS**：
+
+- 文件：`ui/tgpan-scan.js`
+- 注入：`ui/index.html` 里加 `<script src="/tgpan-scan.js" defer>`
+- 效果：右下角「📡 扫描 TG 频道」悬浮按钮 → 弹窗填频道 ID → 调接口 → 显示结果
+
+> ⚠️ UI 是 **embed 进 Go 二进制**的（`//go:embed all:dist`），
+> 改了 `ui/dist/` 后必须**重新编译二进制**，光重打镜像没用。
+
+---
+
+## 七、构建要点（踩过的坑）
+
+### 7.1 必须静态编译（否则容器起不来）
+
+```bash
+CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags "-s -w" -o teldrive .
+```
+
+**原因**：运行镜像是 Alpine（musl libc）。若动态链接 glibc 编译，
+容器里会报：
+
+```
+exec /usr/local/bin/teldrive: no such file or directory
+```
+
+（文件明明存在 —— 实际是找不到动态链接器 `/lib64/ld-linux-x86-64.so.2`）
+
+验证：`ldd ./teldrive` 应输出 `not a dynamic executable`。
+
+### 7.2 编译依赖的生成物
+
+| 生成物 | 来源 | 命令 |
+|---|---|---|
+| `internal/api/` | ogen 从 openapi 规范生成 | `go run github.com/ogen-go/ogen/cmd/ogen --clean --package api --target internal/api openapi.json` |
+| `ui/dist/` | GitHub Release 前端包 | `curl -L https://github.com/tgdrive/teldrive-ui/releases/download/latest/teldrive-ui.zip` |
+
+两者都**已固化进本项目**（`vendor/` 里的二进制是编译好的完整产物），
+正常构建**不需要联网**。
+
+> 抓取时若 GitHub 直连慢，可用 `https://ghfast.top/` 前缀代理。
+
+### 7.3 多架构
+
+| 架构 | 用途 |
 |---|---|
-| 8080 | 前端 UI（百度网盘界面） |
-| 8085 | Teldrive API（内部） |
-| 5244 | OpenList（内部，WebDAV 对外） |
-| 5432 | PostgreSQL（内部） |
+| `amd64` | x86 服务器、飞牛 OS（x86 版） |
+| `arm64` | **甲骨文 ARM 免费机**、树莓派 |
 
-对外只暴露：**8080（UI）** 和 **5244（WebDAV）**。
+### 7.4 pgroonga 硬依赖
+
+Teldrive 的搜索用了 pgroonga 的 `&@~` 操作符和 `teldrive.clean_name()` 函数。
+普通 postgres 镜像会报 `CREATE EXTENSION "pgroonga" is not available`。
+
+解法：基础镜像用 `groonga/pgroonga:latest-alpine-17`。
+
+---
+
+## 八、风险提示
+
+### TG 官方限制
+
+Telegram 官方文档明确警告：
+
+> 不得滥用 API 大量上传/囤积文件，否则可能导致**账号被封**、**频道内容被清空**。
+
+本项目已做限流保护，但仍建议：
+
+- ✅ 用**小号**
+- ✅ 扫描间隔别太短
+- ❌ 不要一次扫几万条消息
+- ❌ 不要用脚本疯狂刷
+
+### 版权
+
+扫描的是**别人发布的内容**。私有频道自用没问题，**不要公开分享、不要二次分发**。
+
+---
+
+## 九、参考
+
+- [Teldrive](https://github.com/tgdrive/teldrive) —— 核心引擎（Go）
+- [gotd/td](https://github.com/gotd/td) —— Go 版 Telegram MTProto 客户端库
+- [pgroonga](https://pgroonga.github.io/) —— PostgreSQL 全文搜索扩展
