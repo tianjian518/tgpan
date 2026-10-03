@@ -193,6 +193,49 @@ docker compose up -d
 >
 > 二维码怎么扫：手机 TG → **设置 → 设备 → 扫描二维码**。
 
+### 🔑 验证码死活收不到？换掉"网页版伪装"（v2.0.0）
+
+**从 v2.0.0 起，支持在容器里填你自己的 TG 应用凭据，这是目前最有效的解法。**
+
+**为什么有效**：Teldrive 原本把自己伪装成"Firefox 打开的网页版 Telegram"：
+
+```
+app-id       = 2496            # web.telegram.org 的共享凭据
+device-model = Firefox/116.0   # 伪装成浏览器
+lang-pack    = 'webk'          # WebK = 网页版内核
+```
+
+而 TG 官方文档明确：**网页版（WebK/WebA）不属于可接收验证码的客户端类型**。
+所以 TG 会回你"已发出"（生成 hash），但验证码永远投递不到 —— 这正好解释
+"每次都提示发出、却一次都收不到"。
+
+v2.0.0 默认已改为**真实 Android 设备身份**，同时支持填入你自己的应用凭据。
+
+**怎么填**：创建容器时，在**环境变量**里加两行（飞牛 OS 里就是"环境变量"输入框）：
+
+```
+TELDRIVE_TG_APP_ID=你的api_id
+TELDRIVE_TG_APP_HASH=你的api_hash
+```
+
+`api_id` / `api_hash` 在 [my.telegram.org/apps](https://my.telegram.org/apps) 免费申请
+（**用电脑浏览器打开**；手机浏览器对那个页面兼容性很差，容易报 ERROR）。
+申请时 **URL 和 Description 不要留空**，Platform 选 Android。
+
+> 不填也能跑（沿用内置默认值），但建议填上——它决定了 TG 是否愿意把验证码投给你。
+
+**其他可选环境变量：**
+
+| 变量 | 默认值 | 说明 |
+|---|---|---|
+| `TELDRIVE_TG_DEVICE_MODEL` | `SM-G9980` | 设备型号 |
+| `TELDRIVE_TG_SYSTEM_VERSION` | `SDK 34` | 系统版本 |
+| `TELDRIVE_TG_APP_VERSION` | `11.2.0` | 应用版本 |
+| `TELDRIVE_TG_LANG_CODE` | `zh` | 语言代码 |
+| `TELDRIVE_TG_LANG_PACK` | 空 | 语言包 |
+| `TELDRIVE_TG_REAL_DEVICE` | `1` | 设为 `0` 关闭真实设备身份 |
+
+
 > 💡 **建议用小号**。
 > ⚠️ 官方警告：滥用 TG API 会**立即封号**；大量囤积文件会导致**频道被清空**。正常使用（看片、少量上传）没问题，别疯狂刷。
 
