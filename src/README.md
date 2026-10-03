@@ -76,7 +76,7 @@ exec /usr/local/bin/teldrive: no such file or directory
 
 验证：`ldd ./teldrive` 要显示 `not a dynamic executable`。
 
-### 2. 路由前缀被剥掉
+### 2. 路由前缀被剥掉（v1.1.0 修复）
 
 `cmd/run.go`：
 
@@ -85,6 +85,31 @@ mux.Mount("/api/", http.StripPrefix("/api", extendedSrv))
 ```
 
 所以进到 `extendedMiddleware` 时 `r.URL.Path` 是 `/scan/channel`，**不是** `/api/scan/channel`。
+
+**但这个前缀问题还有第二个副作用（v1.1.0 才修）**：
+
+ogen 的路由表来自 `openapi.json`，其中：
+
+```json
+"servers": [{ "url": "{url}/api" }]
+```
+
+**路由表里注册的路径是 `/api/auth/ws` 这种带前缀的**。而 `FindRoute(r.Method, r.URL.Path)`
+拿到的是被剥过的 `/auth/ws` → **永远匹配失败** → 请求落到 `m.next.ServeHTTP()`（ogen
+默认实现，普通 HTTP handler，**不处理 WebSocket 升级**）。
+
+表现：登录页点发送验证码后一直 `Please Wait...`，后端日志无任何记录；
+偶发第一次能成功（旧连接残留），之后就全部失效。
+
+修复：查路由前把 `/api` 补回去：
+
+```go
+lookupPath := r.URL.Path
+if !strings.HasPrefix(lookupPath, "/api/") && lookupPath != "/api" {
+    lookupPath = "/api" + lookupPath
+}
+route, ok := m.next.FindRoute(r.Method, lookupPath)
+```
 
 ### 3. UI 是 embed 进二进制的
 

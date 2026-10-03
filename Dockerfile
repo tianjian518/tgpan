@@ -35,6 +35,8 @@ RUN set -eux; \
 FROM ${PG_IMAGE}
 
 ARG TELDRIVE_VERSION=1.8.3
+ARG TGPAN_VERSION=dev
+ENV TGPAN_VERSION=${TGPAN_VERSION}
 
 # 运行所需工具（supervisor 同时管理数据库和 Teldrive）
 RUN apk add --no-cache supervisor tzdata curl bash ca-certificates \

@@ -210,6 +210,10 @@ func (m *extendedMiddleware) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// 注意：不要在这里"补 /api 前缀"！
+	// ogen 的路由表内部已按 servers.url = "{url}/api" 处理，直接传 r.URL.Path 即可。
+	// 曾尝试补前缀，结果 FindRoute 虽然命中，但 ogen 内部据路径解析参数时出错，
+	// 导致 WebSocket 返回的 101 缺少 Sec-WebSocket-Accept 头（假升级，浏览器拒绝）。
 	route, ok := m.next.FindRoute(r.Method, r.URL.Path)
 	if !ok {
 		m.next.ServeHTTP(w, r)
