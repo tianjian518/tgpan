@@ -1,0 +1,34 @@
+# cmd/run.go 改动说明（TGPan）
+#
+# 目的：让 /diag 诊断页能通过根路径访问。
+#
+# 背景：原来的路由是
+#     mux.Mount("/api/", http.StripPrefix("/api", extendedSrv))
+#     mux.Handle("/*", middleware.SPAHandler(ui.StaticFS))
+# 其中 "/*" 会把所有未匹配的路径（包括 /diag）都交给前端单页应用处理，
+# 导致 /diag 返回的是前端 HTML 外壳，诊断接口根本没被调用。
+#
+# 改法：在 Mount 之前插入两条显式路由，直接交给 extendedSrv 处理。
+
+# --- 找到这一段（第 274~276 行附近）---
+	mux.Use(appcontext.Middleware)
+	mux.Mount("/api/", http.StripPrefix("/api", extendedSrv))
+	mux.Handle("/*", middleware.SPAHandler(ui.StaticFS))
+
+# --- 替换为 ---
+	mux.Use(appcontext.Middleware)
+
+	// 诊断页：必须挂在根路径，否则会被下面的 SPAHandler("/*") 兜走
+	mux.Handle("/diag", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		r2 := r.Clone(r.Context())
+		r2.URL.Path = "/diag"
+		extendedSrv.ServeHTTP(w, r2)
+	}))
+	mux.Handle("/diag.json", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		r2 := r.Clone(r.Context())
+		r2.URL.Path = "/diag.json"
+		extendedSrv.ServeHTTP(w, r2)
+	}))
+
+	mux.Mount("/api/", http.StripPrefix("/api", extendedSrv))
+	mux.Handle("/*", middleware.SPAHandler(ui.StaticFS))
