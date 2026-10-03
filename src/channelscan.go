@@ -242,6 +242,7 @@ func (a *apiService) FilesScanChannel(ctx context.Context, req ScanRequest) (*Sc
 					mimeType = "video/mp4"
 				}
 				sizeCopy := size
+				now := time.Now().UTC()
 
 				collected = append(collected, models.File{
 					Name:      uniqueFileName(collected, sanitizeName(fname)),
@@ -252,6 +253,8 @@ func (a *apiService) FilesScanChannel(ctx context.Context, req ScanRequest) (*Sc
 					Status:    "active",
 					ChannelId: &channelId,
 					Parts:     &slice,
+					CreatedAt: &now,
+					UpdatedAt: &now,
 				})
 			}
 
@@ -327,12 +330,15 @@ func (a *apiService) ensureFolder(ctx context.Context, userId int64, name, paren
 		return nil, err
 	}
 
+	now := time.Now().UTC()
 	newFolder := models.File{
-		Name:     name,
-		Type:     "folder",
-		MimeType: "folder",
-		UserId:   userId,
-		Status:   "active",
+		Name:      name,
+		Type:      "folder",
+		MimeType:  "folder",
+		UserId:    userId,
+		Status:    "active",
+		CreatedAt: &now,
+		UpdatedAt: &now,
 	}
 	if parentId != "" {
 		newFolder.ParentId = &parentId
