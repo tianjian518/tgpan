@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"path"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -46,6 +47,12 @@ type ScanRequest struct {
 	Limit int `json:"limit,omitempty"`
 	// MinSize 最小文件字节数，过滤封面小图（默认 1MB）
 	MinSize int64 `json:"minSize,omitempty"`
+	// Incremental 为 true 时只扫比游标更新的消息（自动扫描用这个）
+	Incremental bool `json:"incremental,omitempty"`
+	// AutoRegister 为 true 时把频道登记进 channel_scans，交给后台定时扫
+	AutoRegister bool `json:"autoRegister,omitempty"`
+	// IntervalSeconds 自动扫描间隔（秒），仅 AutoRegister 时有效
+	IntervalSeconds int `json:"intervalSeconds,omitempty"`
 }
 
 // ScanResult 扫描结果
@@ -58,7 +65,11 @@ type ScanResult struct {
 	Imported    int    `json:"imported"`  // 新导入的文件数
 	Skipped     int    `json:"skipped"`   // 跳过（已存在/太小/非视频）
 	TotalSize   int64  `json:"totalSize"` // 导入文件总大小
-	Message     string `json:"message"`
+	// HighWater 本次扫到的最大消息 ID，作为下次增量扫描的游标
+	HighWater int `json:"highWater"`
+	// AutoScan 是否已登记自动扫描
+	AutoScan bool   `json:"autoScan"`
+	Message  string `json:"message"`
 }
 
 // normalizeChannelId 兼容 -100 前缀和裸 ID，统一返回裸 ID
@@ -180,9 +191,37 @@ func (a *apiService) FilesScanChannel(ctx context.Context, req ScanRequest) (*Sc
 			}
 		}
 
+		// 2.1 增量模式：读游标，只拉比它更新的消息。
+		//     TG 的 MessagesGetHistory 是按 ID 倒序返回，OffsetID 表示
+		//     "只返回 ID 小于这个值"的消息。所以游标存的是"已扫过的最大 ID"，
+		//     下次传进去就自动只拿更新的部分，避免重复翻全部历史
+		//     （全量翻历史极易触发 FLOOD_WAIT，严重会封号）。
+		var scanState models.ChannelScan
+		cursor := 0
+		if err := a.db.Where("channel_id = ? AND user_id = ?", channelId, userId).
+			First(&scanState).Error; err == nil {
+			cursor = scanState.LastMessageID
+		} else if err != gorm.ErrRecordNotFound {
+			return err
+		}
+
+		if req.Incremental && cursor == 0 {
+			// 还没扫过，第一次退化为全量
+			req.Incremental = false
+		}
+
 		// 3. 翻历史消息
 		var maxID int
+		if req.Incremental {
+			// 增量：从游标处往后（更新方向）再取一点重叠，防止边界丢消息
+			maxID = 0 // 0 表示从头（最新）开始
+		}
 		scanned := 0
+		stopID := 0
+		if req.Incremental {
+			stopID = cursor
+		}
+
 		for scanned < req.Limit {
 			hist, err := tgAPI.MessagesGetHistory(ctx, &tg.MessagesGetHistoryRequest{
 				Peer:     peer,
@@ -210,6 +249,7 @@ func (a *apiService) FilesScanChannel(ctx context.Context, req ScanRequest) (*Sc
 			}
 
 			batch := 0
+			reachedCursor := false
 			for _, m := range msgs.Messages {
 				msg, ok := m.(*tg.Message)
 				if !ok {
@@ -217,6 +257,12 @@ func (a *apiService) FilesScanChannel(ctx context.Context, req ScanRequest) (*Sc
 				}
 				batch++
 				scanned++
+
+				// 增量模式：碰到已扫过的消息就停，后面的都处理过了
+				if req.Incremental && stopID > 0 && msg.ID <= stopID {
+					reachedCursor = true
+					break
+				}
 
 				if msg.ID > maxID {
 					maxID = msg.ID
@@ -242,9 +288,10 @@ func (a *apiService) FilesScanChannel(ctx context.Context, req ScanRequest) (*Sc
 					mimeType = "video/mp4"
 				}
 				sizeCopy := size
+				now := time.Now().UTC()
 
 				collected = append(collected, models.File{
-					Name:      uniqueFileName(collected, sanitizeName(fname)),
+					Name:      uniqueFileName(collected, cleanMediaName(sanitizeName(fname))),
 					Type:      "file",
 					MimeType:  mimeType,
 					Size:      &sizeCopy,
@@ -252,10 +299,12 @@ func (a *apiService) FilesScanChannel(ctx context.Context, req ScanRequest) (*Sc
 					Status:    "active",
 					ChannelId: &channelId,
 					Parts:     &slice,
+					CreatedAt: &now,
+					UpdatedAt: &now,
 				})
 			}
 
-			if batch < 100 {
+			if reachedCursor || batch < 100 {
 				break
 			}
 			// 避免触发限流
@@ -263,16 +312,37 @@ func (a *apiService) FilesScanChannel(ctx context.Context, req ScanRequest) (*Sc
 		}
 
 		result.Scanned = scanned
+		result.HighWater = maxID
 
 		// 4. 建文件夹并落库
-		if len(collected) > 0 {
-			folder, err := a.ensureFolder(ctx, userId, folderName(req, full.Title), req.ParentId)
+		//
+		//    「一频道一文件夹」的关键：文件夹一旦建立就与 channel_id 绑定，
+		//    存进 channel_scans.folder_id。之后无论扫多少次、频道改没改名，
+		//    都复用同一个文件夹，不会每次扫都新建一个。
+		var folder *models.File
+
+		// 先看这个频道是否已有绑定好的文件夹
+		if scanState.FolderID != "" {
+			var bound models.File
+			if err := a.db.Where("id = ? AND user_id = ? AND status = ?",
+				scanState.FolderID, userId, "active").First(&bound).Error; err == nil {
+				folder = &bound
+			}
+		}
+
+		// 没有绑定就用「频道名」找或建
+		if folder == nil {
+			var err error
+			folder, err = a.ensureFolder(ctx, userId, folderName(req, full.Title), req.ParentId)
 			if err != nil {
 				return err
 			}
-			result.FolderId = folder.ID
-			result.FolderName = folder.Name
+		}
 
+		result.FolderId = folder.ID
+		result.FolderName = folder.Name
+
+		if len(collected) > 0 {
 			var totalSize int64
 			for i := range collected {
 				collected[i].ParentId = &folder.ID
@@ -287,6 +357,13 @@ func (a *apiService) FilesScanChannel(ctx context.Context, req ScanRequest) (*Sc
 			result.Imported = len(collected)
 			result.TotalSize = totalSize
 		}
+
+		// 5. 更新扫描状态（游标 + 文件夹绑定 + 自动扫描登记）
+		if err := a.upsertChannelScan(userId, channelId, full.Title, folder.ID,
+			result.HighWater, req.AutoRegister, req.IntervalSeconds, len(collected), ""); err != nil {
+			return fmt.Errorf("更新扫描状态失败: %w", err)
+		}
+		result.AutoScan = req.AutoRegister
 
 		return nil
 	})
@@ -310,6 +387,151 @@ func folderName(req ScanRequest, title string) string {
 	return sanitizeName(title)
 }
 
+// upsertChannelScan 写入或更新频道扫描状态。
+//
+// 三种情形：
+//  1. 首次扫描      -> 插一行，记下游标与文件夹绑定
+//  2. 再次扫描      -> 更新游标（只往大推，不倒退，避免重复扫）
+//  3. 登记自动扫描  -> 把 enabled 置 true，交给后台定时器
+func (a *apiService) upsertChannelScan(userId, channelId int64, name, folderID string,
+	highWater int, enable bool, intervalSec int, imported int, lastErr string) error {
+
+	now := time.Now().UTC()
+
+	var st models.ChannelScan
+	err := a.db.Where("channel_id = ?", channelId).First(&st).Error
+
+	if err == gorm.ErrRecordNotFound {
+		// 首次登记
+		st = models.ChannelScan{
+			ChannelId:     channelId,
+			UserId:        userId,
+			ChannelName:   name,
+			FolderID:      folderID,
+			Enabled:       enable,
+			LastMessageID: highWater,
+			LastScanAt:    &now,
+			LastError:     lastErr,
+			TotalImported: int64(imported),
+			CreatedAt:     now,
+			UpdatedAt:     now,
+		}
+		if intervalSec > 0 {
+			st.IntervalSeconds = &intervalSec
+		}
+		return a.db.Create(&st).Error
+	}
+	if err != nil {
+		return err
+	}
+
+	// 已存在：更新。
+	// 游标只增不减 —— 如果某次扫描因限流提前结束导致 highWater 变小，
+	// 直接覆盖会让下次重复扫已有消息，浪费配额。
+	updates := map[string]any{
+		"channel_name": name,
+		"folder_id":    folderID,
+		"last_scan_at": now,
+		"last_error":   lastErr,
+		"updated_at":   now,
+	}
+	if highWater > st.LastMessageID {
+		updates["last_message_id"] = highWater
+	}
+	if enable {
+		updates["enabled"] = true
+	}
+	if intervalSec > 0 {
+		updates["interval_seconds"] = intervalSec
+	}
+	if imported > 0 {
+		updates["total_imported"] = st.TotalImported + int64(imported)
+	}
+	return a.db.Model(&models.ChannelScan{}).Where("channel_id = ?", channelId).
+		Updates(updates).Error
+}
+
+// cleanMediaName 清洗视频文件名，提升播放器（网易爆米花/Infuse）的刮削命中率。
+//
+// 为什么需要：
+//   TG 频道里的视频名通常是「【高清】某某电影[1080P]某某压制组.mp4」这种，
+//   播放器按此去 TMDB 搜海报必然搜不到。这里把常见的装饰性标记剥掉，
+//   尽量还原成「某某电影 (2023).mp4」这种可识别的形式。
+//
+// 处理规则（保守，不确定的不动）：
+//  1. 去掉常见的中文方括号标记：【】［］ 内的推广/画质/来源字样
+//  2. 去掉画质标签：1080P / 4K / BluRay / WEB-DL / HDR 等
+//  3. 去掉常见站点/压制组标记
+//  4. 把点分隔的名字还原成空格（Some.Movie.2023.1080p -> Some Movie 2023）
+//  5. 折叠多余空格与连字符
+func cleanMediaName(name string) string {
+	if name == "" {
+		return name
+	}
+
+	ext := path.Ext(name)
+	base := strings.TrimSuffix(name, ext)
+
+	// 1. 去掉中文方括号及其内容里含推广/画质字样的部分
+	//    只删「明显是装饰」的，不含剧情名称，避免误伤片名
+	reBracketNoise := regexp.MustCompile(`[【\[［]([^】\]］]*)[】\]］]`)
+	base = reBracketNoise.ReplaceAllStringFunc(base, func(m string) string {
+		inner := strings.ToLower(m)
+		noise := []string{"高清", "超清", "蓝光", "抢先", "完整版", "未删减",
+			"1080", "720", "2160", "4k", "hdr", "bluray", "web-dl", "webdl",
+			"hd", "hdrip", "bd", "国粤", "双语", "中字", "内嵌", "字幕",
+			"更新", "合集", "全集", "连载", "推荐", "热门", "最新"}
+		for _, n := range noise {
+			if strings.Contains(inner, n) {
+				return "" // 整个括号是装饰性的，删掉
+			}
+		}
+		return m // 保留（可能是片名的一部分，比如【阿凡达】）
+	})
+
+	// 2. 去掉独立的画质/来源标签（空格或点分隔的）
+	labels := []string{
+		"1080p", "720p", "2160p", "480p", "4k", "8k", "hdr", "hdr10", "dv",
+		"bluray", "blu-ray", "bdrip", "brrip", "webrip", "web-dl", "webdl",
+		"hdrip", "dvdrip", "hdtv", "x264", "x265", "h264", "h265", "hevc",
+		"aac", "ac3", "dts", "ddp", "atmos", "10bit", "8bit",
+	}
+	tokens := regexp.MustCompile(`[\.\s_\-]+`).Split(base, -1)
+	kept := make([]string, 0, len(tokens))
+	for _, tk := range tokens {
+		low := strings.ToLower(strings.TrimSpace(tk))
+		if low == "" {
+			continue
+		}
+		skip := false
+		for _, lb := range labels {
+			if low == lb {
+				skip = true
+				break
+			}
+		}
+		if !skip {
+			kept = append(kept, strings.TrimSpace(tk))
+		}
+	}
+	base = strings.Join(kept, " ")
+
+	// 3. 去掉残留的连续分隔符与首尾空白
+	base = strings.Trim(base, " .-—_")
+	base = regexp.MustCompile(`\s+`).ReplaceAllString(base, " ")
+
+	// 清洗后如果空得离谱，退回原名（宁可不清，也不能把名字搞没）
+	if strings.TrimSpace(base) == "" {
+		return name
+	}
+
+	// 4. 把中英文之间的空格规范一下，但保留扩展名
+	if ext == "" {
+		return base
+	}
+	return base + ext
+}
+
 // ensureFolder 找到或创建文件夹
 func (a *apiService) ensureFolder(ctx context.Context, userId int64, name, parentId string) (*models.File, error) {
 	var folder models.File
@@ -327,12 +549,15 @@ func (a *apiService) ensureFolder(ctx context.Context, userId int64, name, paren
 		return nil, err
 	}
 
+	now := time.Now().UTC()
 	newFolder := models.File{
-		Name:     name,
-		Type:     "folder",
-		MimeType: "folder",
-		UserId:   userId,
-		Status:   "active",
+		Name:      name,
+		Type:      "folder",
+		MimeType:  "folder",
+		UserId:    userId,
+		Status:    "active",
+		CreatedAt: &now,
+		UpdatedAt: &now,
 	}
 	if parentId != "" {
 		newFolder.ParentId = &parentId

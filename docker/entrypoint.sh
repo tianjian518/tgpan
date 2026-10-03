@@ -97,6 +97,12 @@ concurrency = 1
 
 [cronjobs]
 enable = true
+# 必须显式写这一项。
+# Teldrive 的 cron 底层用 gocron-gorm-lock 做分布式锁，它要求实例名非空，
+# 否则启动时报 "cron.init.failed: worker is required"。
+# 结构体标签里虽有 default:"cron-locker"，但配置文件中一旦出现 [cronjobs] 段，
+# 该段的未列字段不会回填默认值，所以这里必须写死。
+locker-instance = 'tgpan'
 clean-files-interval = '1h'
 clean-uploads-interval = '12h'
 folder-size-interval = '2h'

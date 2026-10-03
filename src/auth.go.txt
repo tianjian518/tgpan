@@ -12,8 +12,10 @@ import (
 	"math/big"
 	"net"
 	"net/http"
+	"os"
 	"slices"
 	"strconv"
+	"strings"
 	"sync/atomic"
 	"time"
 
@@ -390,10 +392,46 @@ func (e *extendedService) handlePhoneAuth(ctx context.Context, conn *websocket.C
 			return
 		}
 		code := res.(*tg.AuthSentCode)
+		// 把 TG 给的下一次发送方式与超时也记下来：
+		// 如果当前方式（通常是 App）收不到，用户可以用 resendcode 触发换一种方式
+		extra := ""
+		if nt, ok := code.GetNextType(); ok {
+			extra = fmt.Sprintf(" 下次可切换为 %T", nt)
+		}
+		if code.Timeout > 0 {
+			extra += fmt.Sprintf(" 超时=%ds", code.Timeout)
+		}
 		recordAuthEvent("info", "TG 已发出验证码",
-			fmt.Sprintf("type=%T hash长度=%d 耗时=%s",
-				code.Type, len(code.PhoneCodeHash), time.Since(t0).Round(time.Millisecond)))
+			fmt.Sprintf("type=%T hash长度=%d 耗时=%s%s",
+				code.Type, len(code.PhoneCodeHash), time.Since(t0).Round(time.Millisecond), extra))
 		conn.WriteJSON(map[string]any{"type": "auth", "payload": map[string]string{"phoneCodeHash": code.PhoneCodeHash}})
+	case "resendcode":
+		// 换一种方式重发验证码（例如 App 收不到 → 改走短信）
+		recordAuthEvent("info", "请求重发验证码",
+			"手机号 "+maskPhone(message.PhoneNo)+" hash="+shortHash(message.PhoneCodeHash))
+		t1 := time.Now()
+		res, err := tgClient.API().AuthResendCode(ctx, &tg.AuthResendCodeRequest{
+			PhoneNumber:   message.PhoneNo,
+			PhoneCodeHash: message.PhoneCodeHash,
+		})
+		if err != nil {
+			recordAuthEvent("error", "重发失败："+err.Error(),
+				"耗时 "+time.Since(t1).Round(time.Millisecond).String())
+			conn.WriteJSON(map[string]any{"type": "error", "message": err.Error()})
+			return
+		}
+		if sent, ok := res.(*tg.AuthSentCode); ok {
+			recordAuthEvent("info", "重发成功，TG 已用新方式发出",
+				fmt.Sprintf("type=%T 耗时=%s", sent.Type, time.Since(t1).Round(time.Millisecond)))
+			conn.WriteJSON(map[string]any{"type": "auth", "payload": map[string]string{
+				"phoneCodeHash": sent.PhoneCodeHash,
+				"resent":        "1",
+				"resentType":    fmt.Sprintf("%T", sent.Type),
+			}})
+			return
+		}
+		recordAuthEvent("info", "重发成功", fmt.Sprintf("返回类型 %T", res))
+		conn.WriteJSON(map[string]any{"type": "auth", "payload": map[string]string{"resent": "1"}})
 	case "signin":
 		recordAuthEvent("info", "开始提交验证码", "手机号 "+maskPhone(message.PhoneNo))
 		auth, err := tgClient.Auth().SignIn(ctx, message.PhoneNo, message.PhoneCode, message.PhoneCodeHash)
@@ -522,6 +560,15 @@ func prepareSession(user *tg.User, data *session.Data) *api.SessionCreate {
 	return session
 }
 
+// setCookie 构造登录/退出用的会话 Cookie。
+//
+// 相比原版实现的加固点（都是为了让「换标签页/换浏览器/重启后」尽量保持登录）：
+//
+//  1. 显式写 Expires。只给 MaxAge 时，部分浏览器把它当作「会话 Cookie」，
+//     关掉浏览器就丢；给了 Expires 才会真正落盘持久化。
+//  2. SameSite 从 Lax 放宽到 None 时需要 Secure，HTTP 下会被浏览器直接丢掉，
+//     所以这里保持 Lax，但通过环境变量 TELDRIVE_JWT_COOKIE_SAMESITE 可调。
+//  3. 增加 Expires 与 MaxAge 的「双保险」：maxAge <= 0 时视为清除 Cookie。
 func setCookie(name, value string, maxAge int) string {
 	cookie := http.Cookie{
 		Name:     name,
@@ -529,7 +576,32 @@ func setCookie(name, value string, maxAge int) string {
 		MaxAge:   maxAge,
 		HttpOnly: true,
 		Path:     "/",
-		SameSite: http.SameSiteLaxMode,
+		SameSite: cookieSameSiteMode(),
+	}
+	if maxAge > 0 {
+		// 显式过期时间，让浏览器把它当持久化 Cookie 落盘。
+		cookie.Expires = time.Now().Add(time.Duration(maxAge) * time.Second)
+	} else {
+		cookie.Expires = time.Unix(0, 0)
 	}
 	return cookie.String()
+}
+
+// cookieSameSiteMode 允许通过环境变量微调 SameSite 策略。
+//
+// 背景：SameSite=Lax 在「从外部站点跳转进来」的首次请求上不会携带 Cookie，
+// 表现为「刚从 TG / 微信里的链接点进来，就要求重新登录」。
+// 如果你通过反向代理（例如 https 域名）访问，可设为 none 并确保走 HTTPS；
+// 直接 IP:端口 访问的场景保持 lax 即可。
+func cookieSameSiteMode() http.SameSite {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("TELDRIVE_JWT_COOKIE_SAMESITE"))) {
+	case "none":
+		return http.SameSiteNoneMode
+	case "strict":
+		return http.SameSiteStrictMode
+	case "lax", "":
+		return http.SameSiteLaxMode
+	default:
+		return http.SameSiteLaxMode
+	}
 }

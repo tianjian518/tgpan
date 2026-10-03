@@ -4,7 +4,10 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"path"
 	"strconv"
+	"strings"
+	"sync"
 	"time"
 
 	"github.com/go-faster/errors"
@@ -189,10 +192,25 @@ func NewApiService(db *gorm.DB,
 
 type extendedService struct {
 	api *apiService
+
+	// webdavOnce/webdavHandler 保证 WebDAV 处理器只构造一次
+	webdavOnce    sync.Once
+	webdavHandler *webdavHandler
+
+	// scanOnce/scanTicker 保证自动扫描器只启动一次
+	scanOnce sync.Once
 }
 
 func NewExtendedService(api *apiService) *extendedService {
 	return &extendedService{api: api}
+}
+
+// webdav 返回 WebDAV 处理器（懒加载单例）
+func (e *extendedService) webdav() *webdavHandler {
+	e.webdavOnce.Do(func() {
+		e.webdavHandler = &webdavHandler{svc: e}
+	})
+	return e.webdavHandler
 }
 
 type extendedMiddleware struct {
@@ -209,6 +227,34 @@ func (m *extendedMiddleware) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		m.srv.FilesScanChannelHTTP(w, r)
 		return
 	}
+
+	// ---- 频道自动扫描管理 ----
+	if r.URL.Path == "/scan/channels" || r.URL.Path == "/api/scan/channels" {
+		switch r.Method {
+		case http.MethodGet:
+			m.srv.ChannelsScanListHTTP(w, r)
+			return
+		case http.MethodPost:
+			m.srv.ChannelScanRegisterHTTP(w, r)
+			return
+		}
+	}
+	if strings.HasPrefix(r.URL.Path, "/scan/channels/") ||
+		strings.HasPrefix(r.URL.Path, "/api/scan/channels/") {
+		rest := strings.TrimPrefix(strings.TrimPrefix(r.URL.Path, "/api"), "/scan/channels/")
+		parts := strings.Split(strings.Trim(rest, "/"), "/")
+		if len(parts) >= 1 && parts[0] != "" {
+			if len(parts) == 1 && r.Method == http.MethodDelete {
+				m.srv.ChannelScanDeleteHTTP(w, r, parts[0])
+				return
+			}
+			if len(parts) == 2 && parts[1] == "run" && r.Method == http.MethodPost {
+				m.srv.ChannelScanRunNowHTTP(w, r, parts[0])
+				return
+			}
+		}
+	}
+
 	// 诊断接口（自己处理，不依赖原版前端）
 	if r.URL.Path == "/diag" || r.URL.Path == "/api/diag" {
 		m.srv.FilesDiagHTTP(w, r)
@@ -226,6 +272,37 @@ func (m *extendedMiddleware) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// 登录事件日志：记录后端收到的消息与 TG 的返回
 	if r.URL.Path == "/authlog" || r.URL.Path == "/api/authlog" {
 		m.srv.FilesAuthLogHTTP(w, r)
+		return
+	}
+
+	// ---- WebDAV 凭据管理接口（网页界面里生成/查看/删除密码用）----
+	// 注意顺序：必须先于下面的 webdavPrefix 前缀判断。
+	// 否则 /api/webdav/credentials 被 StripPrefix 剥成 /webdav/credentials 后，
+	// 会被 WebDAV 处理器当成一个 DAV 路径抢走，返回 Basic 401 而不是正常的登录校验。
+	if r.URL.Path == "/webdav/credentials" || r.URL.Path == "/api/webdav/credentials" {
+		switch r.Method {
+		case http.MethodGet:
+			m.srv.WebDAVCredentialsListHTTP(w, r)
+			return
+		case http.MethodPost:
+			m.srv.WebDAVCredentialCreateHTTP(w, r)
+			return
+		}
+	}
+	if strings.HasPrefix(r.URL.Path, "/webdav/credentials/") ||
+		strings.HasPrefix(r.URL.Path, "/api/webdav/credentials/") {
+		id := path.Base(r.URL.Path)
+		switch r.Method {
+		case http.MethodDelete:
+			m.srv.WebDAVCredentialDeleteHTTP(w, r, id)
+			return
+		}
+	}
+
+	// ---- WebDAV：给播放器（网易爆米花 / Infuse / VidHub）挂载用 ----
+	// 必须放在 SPA 兜底之前，否则会被前端路由吃掉。
+	if strings.HasPrefix(r.URL.Path, webdavPrefix) {
+		m.srv.webdav().ServeHTTP(w, r)
 		return
 	}
 
@@ -279,3 +356,16 @@ var (
 	_ api.Handler = (*apiService)(nil)
 	_ error       = apiError{}
 )
+
+// StartScanSchedulerFor 供 cmd 包在服务启动时调用，
+// 启动频道自动扫描调度器。
+//
+// 参数是 NewExtendedMiddleware 的返回值。这里用 any 接收是为了
+// 不必把中间件类型导出（该类型只在包内使用）。
+// 内部会做类型断言，取不到就静默跳过 —— 调度器是增强功能，
+// 即使没启动也不该影响服务本身正常提供。
+func StartScanSchedulerFor(mw any) {
+	if m, ok := mw.(*extendedMiddleware); ok && m != nil && m.srv != nil {
+		m.srv.StartScanScheduler()
+	}
+}
