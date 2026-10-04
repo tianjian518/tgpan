@@ -345,12 +345,41 @@
    *  构建界面
    * ==================================================================== */
 
+  /* ====================================================================
+   *  闸门联动：未登录时隐藏控制台入口
+   * ==================================================================== */
+
+  // gateOK 记录闸门是否已满足（内网免密 / 已输密码 / 已配对）。
+  // 默认 false —— 在闸门脚本确认之前先不显示，避免闪一下又藏起来。
+  var gateOK = false;
+
+  function syncFabVisibility() {
+    var st = document.documentElement.getAttribute('data-tgpan-gate');
+    gateOK = (st === 'ok');
+    var fab = document.getElementById('tgpan-fab');
+    if (fab) fab.style.display = gateOK ? '' : 'none';
+    // 闸门未满足时，把已打开的弹窗也关掉
+    if (!gateOK) {
+      var mask = document.getElementById('tgpan-mask');
+      if (mask && mask.parentNode) mask.parentNode.removeChild(mask);
+    }
+  }
+
   function buildUI() {
     var fab = document.createElement('button');
     fab.id = 'tgpan-fab';
     fab.innerHTML = '<span style="font-size:17px">🗂</span><span>TGPan 控制台</span>';
     fab.onclick = openModal;
     document.body.appendChild(fab);
+
+    // ---- 未登录时隐藏控制台入口 ----
+    // 闸门未满足（首次设置 / 待配对 / 需输密码）时，陌生人能看到这个浮动按钮，
+    // 点开后会把「Bot 加速」「剧集」「帮助」等全部功能说明摊在面前。
+    // 后端接口虽然一律拒绝，但界面不该把入口暴露出来。
+    syncFabVisibility();
+    try {
+      window.addEventListener('tgpan:gate-ok', syncFabVisibility);
+    } catch (e) {}
 
     var mask = h([
       '<div id="tgpan-mask">',

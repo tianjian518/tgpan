@@ -1,11 +1,11 @@
 <!doctype html>
-<html lang="zh-CN">
+<html lang="en">
 
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <meta key="title" content="TGPan" property="og:title" />
-  <meta name="description" content="TGPan —— 把 Telegram 频道变成网盘，支持 WebDAV 挂载播放器" />
+  <meta key="title" content="Teldrive" property="og:title" />
+  <meta name="description" content="Teldrive" />
   <title>TGPan</title>
   <link rel="preload" href="/fonts/rubik.woff2" as="font" type="font/woff2" crossorigin />
   <link rel="apple-touch-icon" sizes="180x180" href="/images/apple-touch-icon.png" />
@@ -17,8 +17,12 @@
   <link rel="stylesheet" crossorigin href="/assets/index-irjMiqrd.css">
   <!-- TGPan 百度网盘风格皮肤（配色 + 列表观感） -->
   <script src="/tgpan-skin.js" defer></script>
+  <!-- TGPan 闸门：管理密码 / 初始设置 / 引导配对（必须最先挂载，用于遮罩） -->
+  <script src="/tgpan-gate.js" defer></script>
   <!-- TGPan 控制台（扫描频道 / 自动扫描 / WebDAV） -->
   <script src="/tgpan-scan.js" defer></script>
+  <!-- TGPan 登录增强：给手机号登录补上「改用短信接收」按钮 -->
+  <script src="/tgpan-login.js" defer></script>
 </head>
 
 <body class="bg-surface-container text-on-surface">

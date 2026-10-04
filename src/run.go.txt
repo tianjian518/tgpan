@@ -245,7 +245,14 @@ func setupServer(cfg *config.ServerCmdConfig, db *gorm.DB, cache cache.Cacher, l
 
 	apiSrv := services.NewApiService(db, cfg, cache, botSelector, eventBroadcaster)
 
-	srv, err := api.NewServer(apiSrv, auth.NewSecurityHandler(db, cache, &cfg.JWT))
+	secHandler := auth.NewSecurityHandler(db, cache, &cfg.JWT)
+
+	// 把「TG 主凭证兜底」接到鉴权层：
+	// 浏览器没有有效 Cookie 时（内网免密入口 / 换设备），
+	// 只要已经配对过 TG，就用服务端主凭证放行，不再要求扫码。
+	services.WireMasterClaims(secHandler, apiSrv)
+
+	srv, err := api.NewServer(apiSrv, secHandler)
 
 	if err != nil {
 		lg.Error("failed to create server", zap.Error(err))

@@ -367,6 +367,9 @@ func (e *extendedService) handleQRAuth(ctx context.Context, conn *websocket.Conn
 	sessionData := &types.SessionData{}
 	json.Unmarshal(res, sessionData)
 	session := prepareSession(user, &sessionData.Data)
+	// 配对成功 → 把 TG 主凭证落盘到 /data，
+	// 这样以后内网入口免密、域名入口只用管理密码，都不必再扫码。
+	e.persistMasterSession(ctx, session, logger)
 	conn.WriteJSON(map[string]any{"type": "auth", "payload": session, "message": "success"})
 }
 
@@ -466,6 +469,8 @@ func (e *extendedService) handlePhoneAuth(ctx context.Context, conn *websocket.C
 		sessionData := &types.SessionData{}
 		json.Unmarshal(res, sessionData)
 		session := prepareSession(user, &sessionData.Data)
+		// 验证码配对成功 → 同样落盘主凭证
+		e.persistMasterSession(ctx, session, logger)
 		conn.WriteJSON(map[string]any{"type": "auth", "payload": session, "message": "success"})
 	}
 }
@@ -494,6 +499,9 @@ func (e *extendedService) handle2FAAuth(ctx context.Context, conn *websocket.Con
 	sessionData := &types.SessionData{}
 	json.Unmarshal(res, sessionData)
 	session := prepareSession(user, &sessionData.Data)
+	// 配对成功 → 把 TG 主凭证落盘到 /data，
+	// 这样以后内网入口免密、域名入口只用管理密码，都不必再扫码。
+	e.persistMasterSession(ctx, session, logger)
 	conn.WriteJSON(map[string]any{"type": "auth", "payload": session, "message": "success"})
 }
 
@@ -603,5 +611,31 @@ func cookieSameSiteMode() http.SameSite {
 		return http.SameSiteLaxMode
 	default:
 		return http.SameSiteLaxMode
+	}
+}
+
+// persistMasterSession 把扫码/验证码配对成功后的 TG 凭证写入闸门数据文件。
+//
+// 为什么要这一步：TG 的主凭证是「服务端资产」，不该随浏览器 Cookie 生死。
+// 落盘之后：
+//   - 飞牛 OS 内网入口 → 免密直进
+//   - 对外域名入口     → 只要管理密码，不必再扫码
+func (e *extendedService) persistMasterSession(ctx context.Context, session *api.SessionCreate, logger *zap.Logger) {
+	g := e.gate()
+	if g == nil || session == nil || session.Session == "" {
+		return
+	}
+	tokenhash := md5.Sum([]byte(session.Session))
+	hexToken := hex.EncodeToString(tokenhash[:])
+	if err := g.StoreMaster(session.Session, session.UserId, hexToken, session.UserName, session.Name); err != nil {
+		if logger != nil {
+			logger.Error("gate.persist_master_failed", zap.Error(err))
+		}
+		return
+	}
+	if logger != nil {
+		logger.Info("gate.persist_master_ok",
+			zap.Int64("userId", session.UserId),
+			zap.String("user", session.UserName))
 	}
 }

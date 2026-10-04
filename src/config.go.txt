@@ -48,6 +48,35 @@ type EventConfig struct {
 	DeduplicationTTL time.Duration `default:"5s" description:"Event deduplication time-to-live"`
 }
 
+// GateConfig 控制「TGPan 自有登录」（俗称闸门 / gate）。
+//
+// 设计背景：TG 的扫码 / 验证码登录在很多场景下不可用（手机无法扫自己的码、
+// 某些客户端收不到验证码）。因此把「TG 配对」与「日常进入」彻底解耦：
+//
+//	TG 配对  —— 只做一次，成功后主凭证落盘到 DataFile。
+//	日常进入 —— 用 TGPan 自己的管理密码（或内网免密）。
+//
+// DataFile 存两样东西：管理密码哈希 + TG 主凭证。
+// 放在 /data 目录下，容器重启 / 重建都不会丢。
+type GateConfig struct {
+	// DataFile 闸门数据文件路径（管理密码哈希 + TG 主凭证）
+	DataFile string `default:"/data/tgpan-gate.json" description:"Gate data file: admin password hash and TG master credentials"`
+
+	// RequireLoginHosts 需要登录的 Host 白名单。
+	// 约定：凡是 Request.Host（去掉端口）命中此列表的，必须输入管理密码；
+	// 其余 Host（内网地址、localhost、飞牛 OS 入口等）一律免密放行。
+	//
+	// 注意这里是「反向白名单」：列出来的是「要登录的」，不是「免登录的」。
+	// 目的是无需事先知道内网 IP 是多少，默认放行内网，只锁死对外域名。
+	RequireLoginHosts []string `default:"pan.2016.de5.net" description:"Hosts that REQUIRE the admin password (usually the public domain); all other hosts bypass login"`
+
+	// SessionTTL 管理密码登录后颁发的通行证有效期
+	SessionTTL time.Duration `default:"30d" description:"Gate session validity duration"`
+
+	// Disable 彻底关闭闸门（回到原版行为：只有 TG 扫码）
+	Disable bool `default:"false" description:"Disable the gate entirely and fall back to Telegram-only login"`
+}
+
 type ServerCmdConfig struct {
 	Server   ServerConfig
 	Log      LoggingConfig
@@ -58,6 +87,7 @@ type ServerCmdConfig struct {
 	Cache    CacheConfig
 	Redis    RedisConfig
 	Events   EventConfig
+	Gate     GateConfig
 }
 
 type CheckCmdConfig struct {

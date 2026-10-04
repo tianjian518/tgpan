@@ -36,6 +36,10 @@ type apiService struct {
 	botSelector    tgc.BotSelector
 	events         events.EventBroadcaster
 	channelManager *tgc.ChannelManager
+
+	// gate 是 TGPan 自有登录闸门（管理密码 + TG 主凭证）。
+	// 可能为 nil（初始化失败时降级为原版 TG 扫码登录）。
+	gate *gateService
 }
 
 func (a *apiService) newMiddlewares(ctx context.Context, retries int) []telegram.Middleware {
@@ -180,7 +184,7 @@ func NewApiService(db *gorm.DB,
 	botSelector tgc.BotSelector,
 	events events.EventBroadcaster) *apiService {
 
-	return &apiService{
+	svc := &apiService{
 		db:             db,
 		cnf:            cnf,
 		cache:          cache,
@@ -188,6 +192,27 @@ func NewApiService(db *gorm.DB,
 		events:         events,
 		channelManager: tgc.NewChannelManager(db, cache, &cnf.TG),
 	}
+
+	// 初始化 TGPan 自有登录闸门。
+	// 失败不致命：降级为原版「只有 TG 扫码」的登录方式，
+	// 只是用户没法用管理密码进入而已。
+	g, err := newGateService(
+		cnf.Gate.DataFile,
+		cnf.Gate.RequireLoginHosts,
+		cnf.Gate.SessionTTL,
+		cnf.Gate.Disable,
+	)
+	if err != nil {
+		logging.Component("GATE").Error("gate.init.failed", zap.Error(err))
+	} else {
+		svc.gate = g
+		logging.Component("GATE").Info("gate.init.completed",
+			zap.String("dataFile", cnf.Gate.DataFile),
+			zap.Strings("requireLoginHosts", cnf.Gate.RequireLoginHosts),
+		)
+	}
+
+	return svc
 }
 
 type extendedService struct {
@@ -219,6 +244,52 @@ type extendedMiddleware struct {
 }
 
 func (m *extendedMiddleware) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	// ---- TGPan 闸门接口（设置密码 / 登录 / 状态查询）----
+	// 必须放在最前面：这些接口本身不能要求已登录，否则无法进入。
+	if sub := gatePath(r.URL.Path); sub != "" {
+		// 只处理明确命中的子路径，避免把 /gateway 之类也吞掉
+		switch sub {
+		case "/status", "/setup", "/login", "/logout", "/password", "/repair":
+			m.srv.GateHTTP(w, r, sub)
+			return
+		}
+	}
+
+	// ---- 闸门拦截 ----
+	// 未初始化 / 未配对 / 当前 Host 需要登录且未登录时，
+	// 所有 API 请求一律拒绝，并告知前端该显示哪个界面。
+	//
+	// 例外（不拦，否则会造成可见故障）：
+	//   · /version、/health —— 容器健康检查与前端探测，只暴露版本号
+	//   · WebDAV 的 OPTIONS —— 播放器（爆米花/Infuse）挂载前会先发不带凭据的
+	//     OPTIONS 探测能力，靠响应里的 DAV 头判断"对面是不是 WebDAV 服务器"。
+	//     被闸门拦掉会丢 DAV 头 → 播放器直接判挂载失败，连密码框都不弹。
+	if g := m.srv.gate(); g != nil && !gateExemptRequest(r) {
+		st := g.Status(r)
+		if st.State == gateStateInit || st.State == gateStateNeedPair || st.State == gateStateNeedLogin {
+			writeJSON(w, http.StatusUnauthorized, map[string]any{
+				"error": "gate not satisfied",
+				"gate":  st,
+			})
+			return
+		}
+
+		// 闸门已放行（内网免密 / 已输密码）→ 检查请求是否已带有效凭证。
+		//
+		// 如果没有（换设备、内网免密入口），就从主凭证合成一个合法 JWT
+		// 塞进请求，让下游 ogen 鉴权自然通过。
+		//
+		// 必须在请求进入 ogen 之前做，因为 ogen 在「完全没带凭证」时
+		// 会直接判 security 不满足，压根不会走到主凭证兜底逻辑。
+		if m.srv.api != nil && m.srv.api.cnf != nil {
+			if tok, ok := g.SynthesizeAccessToken(m.srv.api.cnf.JWT.Secret); ok {
+				if _, err := r.Cookie(authCookieName); err != nil {
+					r.AddCookie(&http.Cookie{Name: authCookieName, Value: tok})
+				}
+			}
+		}
+	}
+
 	// 频道扫描接口（自定义扩展，不走 ogen 路由表）
 	// 注意：外层 mux.Mount("/api/", http.StripPrefix("/api", ...)) 已剥掉 /api 前缀，
 	//      所以这里看到的路径是 /scan/channel；两种都兼容以防路由配置变化

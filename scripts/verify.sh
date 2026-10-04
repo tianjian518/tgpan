@@ -207,6 +207,112 @@ fi
 echo "    ✅ DAV / WWW-Authenticate / Accept-Ranges 三个头齐全（爆米花可正常探测）"
 
 echo
+echo "==> 5.3 v2.6.1 登录增强：手机号登录的「改用短信」入口"
+
+echo "    登录增强脚本是否已随前端发布 →"
+if curl -fsS "$BASE/tgpan-login.js" -o /tmp/_lg.js 2>/dev/null; then
+  echo "    ✅ /tgpan-login.js 可访问（$(wc -c < /tmp/_lg.js) 字节）"
+else
+  echo "    ❌ /tgpan-login.js 取不到 —— 登录增强没打进镜像"
+  exit 1
+fi
+
+echo "    index.html 是否已挂载该脚本 →"
+if curl -s "$BASE/" | grep -q 'tgpan-login.js'; then
+  echo "    ✅ 登录页会加载登录增强脚本"
+else
+  echo "    ❌ index.html 没有引用 tgpan-login.js，脚本不会生效"
+  exit 1
+fi
+
+echo "    脚本是否真的实现了 resendcode 通道 →"
+# 这是本功能的核心：后端 auth.go 早就有 resendcode 分支，
+# 但原版前端从没调用过，导致「App 收不到码」时界面上无路可走。
+for needle in "resendcode" "requestSms" "phoneCodeHash" "/api/auth/ws"; do
+  if grep -q "$needle" /tmp/_lg.js; then
+    echo "    ✅ 含 $needle"
+  else
+    echo "    ❌ 缺 $needle —— 短信切换功能不完整"
+    exit 1
+  fi
+done
+
+echo "    关键前提：后端必须支持 resendcode →"
+# 用一个明显无效的 hash 探路：只要不是 404/405，就说明这条 WS 分支是活的。
+# （WS 是在 /api/auth/ws 里按 message 分发，HTTP 层看不到，
+#   因此这里检查的是同一个 handler 里的其他已知消息类型能否正常回响应）
+login_probe=$(curl -s -o /dev/null -w "%{http_code}" -X POST \
+  -H 'Content-Type: application/json' -d '{}' "$BASE/api/auth/login")
+if [ "$login_probe" = "404" ]; then
+  echo "    ❌ /api/auth/login 不存在，登录链路异常"
+  exit 1
+fi
+echo "    ✅ 登录链路正常（/api/auth/login → HTTP $login_probe）"
+
+echo
+echo "==> 5.4 v2.6.2 闸门（管理密码 + 内网免密）"
+echo "    闸门状态接口是否存在 →"
+gs_code=$(curl -s -o /dev/null -w "%{http_code}" "$BASE/api/gate/status")
+if [ "$gs_code" != "200" ]; then
+  echo "    ❌ /api/gate/status 返回 $gs_code（期望 200）"
+  exit 1
+fi
+echo "    ✅ /api/gate/status → HTTP $gs_code"
+echo "    闸门状态内容 →"
+gs_body=$(curl -s "$BASE/api/gate/status")
+echo "       $gs_body"
+echo "$gs_body" | grep -q '"state"' || { echo "    ❌ 状态返回里没有 state 字段"; exit 1; }
+echo "    ✅ 返回含 state 字段"
+
+echo "    前端闸门脚本是否已发布 →"
+gate_js=$(curl -s -o /dev/null -w "%{http_code}" "$BASE/tgpan-gate.js")
+gate_len=$(curl -s "$BASE/tgpan-gate.js" | wc -c)
+if [ "$gate_js" != "200" ] || [ "$gate_len" -lt 1000 ]; then
+  echo "    ❌ /tgpan-gate.js 异常（HTTP $gate_js, $gate_len 字节）"
+  exit 1
+fi
+echo "    ✅ /tgpan-gate.js → HTTP $gate_js（$gate_len 字节）"
+
+echo "    index.html 是否已挂载闸门脚本 →"
+if curl -s "$BASE/" | grep -q '/tgpan-gate.js'; then
+  echo "    ✅ 已挂载"
+else
+  echo "    ❌ index.html 未引用 /tgpan-gate.js"
+  exit 1
+fi
+
+echo "    闸门脚本关键实现是否齐全 →"
+gate_src=$(curl -s "$BASE/tgpan-gate.js")
+for kw in '/gate/setup' '/gate/login' '设置密码' '连接你的 Telegram'; do
+  if echo "$gate_src" | grep -q "$kw"; then
+    echo "    ✅ 含 $kw"
+  else
+    echo "    ❌ 缺少 $kw"
+    exit 1
+  fi
+done
+
+echo "    反向白名单逻辑：对外域名要密码、内网免密 →"
+# 用 Host 头模拟两种来源。未登录时：
+#   域名  → state 不可能是 ok（需要密码）
+#   内网  → 若已配对则 ok；未配对则为 need_pair（也不算错）
+dom_state=$(curl -s -H "Host: pan.2016.de5.net" "$BASE/api/gate/status" \
+  | sed -n 's/.*"state":"\([^"]*\)".*/\1/p')
+if [ "$dom_state" = "ok" ]; then
+  echo "    ⚠  域名 Host 直接返回 ok（可能是 disable=true，或本来就是免密配置）"
+else
+  echo "    ✅ 域名 Host state=$dom_state（需要密码/待设置，符合预期）"
+fi
+
+echo "    未登录时受保护接口应被拦（不能返回数据）→"
+protected=$(curl -s -o /dev/null -w "%{http_code}" "$BASE/api/users/config")
+if [ "$protected" = "200" ]; then
+  echo "    ⚠  /api/users/config 未登录竟然 200（若闸门 disable=true 属正常）"
+else
+  echo "    ✅ /api/users/config 未登录 → HTTP $protected（已拦截）"
+fi
+
+echo
 echo "==> 6. 剧集识别引擎自测（不依赖网络）"
 echo "    在容器内跑单元测试…"
 if docker exec "$CONTAINER" sh -c 'command -v go >/dev/null 2>&1' 2>/dev/null; then

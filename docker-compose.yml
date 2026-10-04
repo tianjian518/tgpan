@@ -37,6 +37,24 @@ services:
       # 如果你用反向代理 + HTTPS 域名访问，且经常从外部链接跳进来，
       # 可设为 none，能减少「刚从微信/TG 点进来就要重新登录」的情况
       # - TELDRIVE_JWT_COOKIE_SAMESITE=lax
+      #
+      # ================================================================
+      #  闸门（管理密码 / 内网免密）—— 2.6.2 新增
+      # ================================================================
+      # 作用：第一次打开时让你设一个管理密码，之后：
+      #   · 内网 / 飞牛 OS 入口 → 免密直接进
+      #   · 对外域名入口       → 输管理密码，不用再扫码
+      #
+      # 需要输密码的 Host（反向白名单，逗号分隔）。
+      # 只列你的对外域名；内网地址不用写，默认就是免密。
+      # - TELDRIVE_GATE_REQUIRE_LOGIN_HOSTS=pan.2016.de5.net
+      #
+      # 闸门数据文件路径（管理密码哈希 + TG 主凭证），默认 /data/tgpan-gate.json
+      # 注意：删掉这个文件 = 恢复出厂设置，需要重新设密码并重新扫码配对
+      # - TELDRIVE_GATE_DATA_FILE=/data/tgpan-gate.json
+      #
+      # 想彻底关掉闸门、回到「只能用 TG 扫码」的原版行为，设为 true
+      # - TELDRIVE_GATE_DISABLE=false
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8080/api/version"]
       interval: 30s
