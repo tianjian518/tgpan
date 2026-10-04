@@ -154,6 +154,25 @@ func (h *webdavHandler) basePath(r *http.Request) string {
 
 // ServeHTTP 是 WebDAV 的入口分发。
 func (h *webdavHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	// 0. 能力声明：无论是否通过认证，都先把 DAV 能力头挂上。
+	//
+	// 为什么要放在认证之前：
+	//   播放器（爆米花 / Infuse / nPlayer / WinSCP / Windows 资源管理器）
+	//   挂载前会先发一个不带凭据的 OPTIONS，靠响应里的 DAV 头判断
+	//   "对面到底是不是一个 WebDAV 服务器"。如果这个头只在认证通过后才给，
+	//   部分客户端会直接判定挂载失败，连账号密码框都不弹。
+	//
+	//   认证失败时我们依然返回 401 + WWW-Authenticate（这是 RFC 7235 规定的
+	//   标准质询流程，客户端收到后会带着 Authorization 重试），
+	//   但 401 的响应里已经带上了 DAV 头，客户端能据此确认协议能力。
+	//
+	//   注意：这里只声明"我支持 WebDAV"，不泄露任何网盘内容，
+	//   未认证请求一个字节的文件数据也拿不到，安全性不受影响。
+	w.Header().Set("DAV", davComplianceClasses)
+	w.Header().Set("MS-Author-Via", "DAV")
+	w.Header().Set("Allow", "OPTIONS, GET, HEAD, PROPFIND")
+	w.Header().Set("Accept-Ranges", "bytes")
+
 	// 1. 认证：HTTP Basic Auth
 	user, cred, ok := h.authenticate(w, r)
 	if !ok {
@@ -183,9 +202,8 @@ func (h *webdavHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.handleGet(w, r, user, cred, relPath, logger)
 	default:
 		// 播放器可能探测 PROPPATCH / LOCK 等，明确告诉它不支持，
-		// 而不是返回 404（返回 404 有些播放器会直接判定挂载失败）
-		w.Header().Set("DAV", davComplianceClasses)
-		w.Header().Set("Allow", "OPTIONS, GET, HEAD, PROPFIND")
+		// 而不是返回 404（返回 404 有些播放器会直接判定挂载失败）。
+		// DAV / Allow 头已在 ServeHTTP 开头统一设置，这里不重复设。
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 	}
 }
@@ -193,11 +211,9 @@ func (h *webdavHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 // handleOptions 响应播放器的能力探测。
 // 爆米花/Infuse 挂载前会先发 OPTIONS，看返回头里有没有 DAV: 1,2。
 // 没有这个头，播放器会认为"这不是个 WebDAV 服务器"而拒绝挂载。
+//
+// 能力头已在 ServeHTTP 开头统一挂好（认证前就挂），这里只补状态码。
 func (h *webdavHandler) handleOptions(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("DAV", davComplianceClasses)
-	w.Header().Set("MS-Author-Via", "DAV")
-	w.Header().Set("Allow", "OPTIONS, GET, HEAD, PROPFIND")
-	w.Header().Set("Accept-Ranges", "bytes")
 	w.WriteHeader(http.StatusOK)
 }
 

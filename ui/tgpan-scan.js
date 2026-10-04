@@ -108,8 +108,8 @@
     '.tgpan-btn.danger{background:#e64545;color:#fff}',
     '.tgpan-btn.danger:hover{background:#d33838}',
     '.tgpan-btn.sm{padding:7px 13px;font-size:13px;border-radius:7px}',
-    '#tgpan-actions{display:flex;gap:10px;margin-top:20px}',
-    '#tgpan-actions .tgpan-btn{flex:1}',
+    '.tgpan-actions{display:flex;gap:10px;margin-top:20px}',
+    '.tgpan-actions .tgpan-btn{flex:1}',
 
     /* --- 结果提示 --- */
     '.tgpan-result{margin-top:16px;padding:13px 15px;border-radius:9px;font-size:13px;',
@@ -248,7 +248,7 @@
     '.tgpan-mount .v{font-size:12px}',
     '.tgpan-ch{flex-wrap:wrap}',
     '.tgpan-ch .ops{width:100%;justify-content:flex-end}',
-    '#tgpan-actions{flex-direction:column-reverse}',
+    '.tgpan-actions{flex-direction:column-reverse}',
     '.tgpan-series-detail .k{flex:0 0 56px}',
     '}'
   ].join('');
@@ -363,6 +363,7 @@
       '      <button class="tgpan-tab" role="tab" aria-selected="false" tabindex="-1" data-tab="auto">🔄 自动扫描</button>',
       '      <button class="tgpan-tab" role="tab" aria-selected="false" tabindex="-1" data-tab="webdav">🔗 WebDAV</button>',
       '      <button class="tgpan-tab" role="tab" aria-selected="false" tabindex="-1" data-tab="series">🎬 剧集</button>',
+      '      <button class="tgpan-tab" role="tab" aria-selected="false" tabindex="-1" data-tab="bots">🤖 Bot 加速</button>',
       '      <button class="tgpan-tab" role="tab" aria-selected="false" tabindex="-1" data-tab="help">💡 帮助</button>',
       '    </div>',
       '  </div>',
@@ -386,7 +387,7 @@
       '        </label>',
       '      </div>',
       '      <div id="tgpan-scan-result" class="tgpan-result"></div>',
-      '      <div id="tgpan-actions">',
+      '      <div class="tgpan-actions">',
       '        <button class="tgpan-btn ghost" id="tgpan-close">关闭</button>',
       '        <button class="tgpan-btn primary" id="tgpan-start">开始扫描</button>',
       '      </div>',
@@ -435,6 +436,40 @@
       '      </div>',
       '    </div>',
 
+      '    <div class="tgpan-pane" data-pane="bots">',
+      '      <div class="tgpan-help" style="margin-top:0">',
+      '        <b>🤖 为什么要配 Bot？</b><br>',
+      '        默认情况下，拉视频用的是<b>你自己的 TG 账号</b>，每次拖进度条都要重建一次账号连接，',
+      '        所以会卡十几秒。配上 Bot 之后改用 Bot 连接，<b>建连快得多</b>，拖进度能明显变顺。',
+      '      </div>',
+      '      <div class="tgpan-help">',
+      '        <b>⚠️ 只能加速「你自己的频道」</b><br>',
+      '        Bot 需要被设为频道管理员才能取文件。所以：<br>',
+      '        · <b>你自己建的频道</b>（含从别处转发进来的）→ ✅ 能自动加速<br>',
+      '        · <b>别人的频道</b>（你只是订阅）→ ⚠️ 加不进去，维持原样，但仍可正常播放<br>',
+      '        保存后下方会逐个列出结果，失败的不会影响使用。',
+      '      </div>',
+      '      <div class="tgpan-help">',
+      '        <b>🔑 怎么拿 Bot Token？</b><br>',
+      '        在 TG 里找 <code>@BotFather</code> → 发 <code>/newbot</code> → 起个名字 → 它给你一串',
+      '        <code>数字:字母</code> 形式的字符串，那就是 Token。<br>',
+      '        <b>可以填多个</b>（一行一个），系统会轮流使用来分摊限流，更稳。',
+      '      </div>',
+      '      <div class="tgpan-field" style="margin-top:16px">',
+      '        <label>Bot Token <span class="hint">（一行一个，留空则清除）</span></label>',
+      '        <textarea id="tgpan-bots" rows="4" spellcheck="false"',
+      '          placeholder="1234567890:AAHdqTcvCH1vGWJxfSeofSAs0K5PALDsaw&#10;9876543210:BBJkLmNoPqRsTuVwXyZ0123456789abcde"',
+      '          style="width:100%;font-family:ui-monospace,Menlo,Consolas,monospace;',
+      '          font-size:12.5px;line-height:1.6;resize:vertical"></textarea>',
+      '      </div>',
+      '      <div id="tgpan-bots-status" style="margin-top:4px"></div>',
+      '      <div id="tgpan-bots-result" class="tgpan-result"></div>',
+      '      <div class="tgpan-actions">',
+      '        <button class="tgpan-btn ghost" id="tgpan-bots-clear">清除</button>',
+      '        <button class="tgpan-btn primary" id="tgpan-bots-save">保存并加速</button>',
+      '      </div>',
+      '    </div>',
+
       '    <div class="tgpan-pane" data-pane="help">',
       '      <div class="tgpan-help" style="margin-top:0">',
       '        <b>💡 怎么获取频道 ID？</b><br>',
@@ -458,6 +493,12 @@
       '        在爆米花的「添加媒体库 → WebDAV」里填：<br>',
       '        地址：<code>http://你的服务器IP:端口/webdav</code><br>',
       '        账号 / 密码：用「WebDAV」页签里生成的那对。',
+      '      </div>',
+      '      <div class="tgpan-help">',
+      '        <b>🐢 拖进度条很慢怎么办？</b><br>',
+      '        默认用你的 TG 账号拉流，每次拖进度都要重建一次账号连接，会卡十几秒。<br>',
+      '        去「🤖 Bot 加速」页签填上 Bot Token，改用 Bot 连接，拖进度会明显变顺。<br>',
+      '        注意：只能加速<b>你自己建的频道</b>；别人的频道加不进去，但不影响正常播放。',
       '      </div>',
       '      <div class="tgpan-help">',
       '        <b>🎬 电视剧会怎么整理？</b><br>',
@@ -509,6 +550,7 @@
       if (name === 'auto') loadChannels();
       if (name === 'webdav') loadCredentials();
       if (name === 'series') loadSeries();
+      if (name === 'bots') loadBots();
     }
 
     for (var i = 0; i < tabs.length; i++) {
@@ -536,6 +578,8 @@
     $('#tgpan-cred-new', mask).onclick = createCredential;
     $('#tgpan-cred-refresh', mask).onclick = function () { loadCredentials(true); };
     $('#tgpan-series-refresh', mask).onclick = function () { loadSeries(true); };
+    $('#tgpan-bots-save', mask).onclick = saveBots;
+    $('#tgpan-bots-clear', mask).onclick = clearBots;
   }
 
   function openModal() {
@@ -1167,6 +1211,170 @@
         btn.disabled = false;
         btn.textContent = '生成 WebDAV 密码';
       });
+  }
+
+  /* ======================================================================
+   *  功能五：Bot 加速
+   *
+   *  默认拉流用的是用户自己的 TG 账号，每次拖进度条都要重建一次账号连接，
+   *  所以会卡十几秒。配上 Bot 之后改走 Bot 连接，建连快得多。
+   *
+   *  用的全是原版 Teldrive 已有的接口，没有新写后端：
+   *    GET    /users/config  → 看当前存了哪些 bot
+   *    POST   /users/bots    → 存 bot（后端会自动把 bot 设为各频道管理员）
+   *    DELETE /users/bots    → 清空
+   * ==================================================================== */
+  var botsSeq = 0;
+
+  // 只做格式校验，不做网络校验 —— 真正的有效性由后端调用 TG 时判定。
+  // TG Bot Token 形如： 数字:35位左右的字母数字
+  var BOT_TOKEN_RE = /^\d{6,}:[A-Za-z0-9_-]{30,}$/;
+
+  function parseBotTokens(raw) {
+    var out = [];
+    var seen = {};
+    var lines = String(raw || '').split('\n');
+    for (var i = 0; i < lines.length; i++) {
+      var t = lines[i].trim();
+      if (!t) continue;
+      if (seen[t]) continue;      // 顺手去重，重复填不会造成后端重复处理
+      seen[t] = 1;
+      out.push(t);
+    }
+    return out;
+  }
+
+  function loadBots(force) {
+    var box = document.getElementById('tgpan-bots-status');
+    var ta = document.getElementById('tgpan-bots');
+    if (!box || !ta) return;
+    if (!force && ta.getAttribute('data-loaded') === '1') return;
+
+    var seq = ++botsSeq;
+    box.innerHTML = skeleton(1);
+
+    api('GET', '/users/config').then(function (r) {
+      if (seq !== botsSeq) return;
+      if (!r.ok) {
+        // 401 是「没登录」，属于常见情况，给用户看得懂的话；
+        // 其它错误也尽量别把后端英文原文直接甩出来。
+        if (r.status === 401) {
+          box.innerHTML = emptyState('🔒',
+            '请先登录网盘账号，登录后回到这里配置 Bot。');
+        } else {
+          box.innerHTML = emptyState('⚠️',
+            '暂时读不到 Bot 状态，请稍后刷新页面重试。');
+        }
+        bindGoto(box);
+        return;
+      }
+      var bots = (r.data && r.data.bots) || [];
+      ta.setAttribute('data-loaded', '1');
+
+      if (!bots.length) {
+        box.innerHTML =
+          '<div class="tgpan-help" style="margin:0">' +
+          '<b>当前未配置 Bot</b> —— 正在用你的 TG 账号拉流，拖进度条会比较慢。' +
+          '把 Token 填到上面，点「保存并加速」即可。</div>';
+        return;
+      }
+
+      var html = ['<div class="tgpan-help" style="margin:0">',
+        '<b>已配置 ' + bots.length + ' 个 Bot</b>：<br>'];
+      for (var i = 0; i < bots.length; i++) {
+        // Token 只显示前后各一小段，避免完整泄露在界面上
+        var t = String(bots[i]);
+        var masked = t.length > 18
+          ? esc(t.slice(0, 12)) + '…' + esc(t.slice(-4))
+          : esc(t);
+        html.push('· <code>' + masked + '</code><br>');
+      }
+      html.push('</div>');
+      box.innerHTML = html.join('');
+      // 回填到输入框，方便用户增删
+      ta.value = bots.join('\n');
+    });
+  }
+
+  function saveBots() {
+    var ta = document.getElementById('tgpan-bots');
+    var res = document.getElementById('tgpan-bots-result');
+    var btn = document.getElementById('tgpan-bots-save');
+    if (!ta) return;
+
+    var tokens = parseBotTokens(ta.value);
+
+    if (!tokens.length) {
+      setResult(res, 'error', '请先填入至少一个 Bot Token。');
+      return;
+    }
+
+    var bad = [];
+    for (var i = 0; i < tokens.length; i++) {
+      if (!BOT_TOKEN_RE.test(tokens[i])) bad.push(tokens[i]);
+    }
+    if (bad.length) {
+      setResult(res, 'error',
+        '有 ' + bad.length + ' 个 Token 格式不对。正确格式形如 ' +
+        '1234567890:AAHdqTcvCH1vGWJxfSeofSAs0K5PALDsaw（数字:字母数字）。');
+      return;
+    }
+
+    if (btn) { btn.disabled = true; btn.textContent = '保存中…'; }
+    setResult(res, 'loading',
+      '正在保存并将 Bot 加入频道，请稍候…（频道较多时可能需要一两分钟，' +
+      '期间请不要关闭窗口）');
+
+    var seq = ++botsSeq;
+    api('POST', '/users/bots', { bots: tokens }).then(function (r) {
+      if (seq !== botsSeq) return;
+      if (btn) { btn.disabled = false; btn.textContent = '保存并加速'; }
+
+      if (!r.ok) {
+        // 同样：不把后端英文原文直接给用户看
+        if (r.status === 401) {
+          setResult(res, 'error', '登录已失效，请刷新页面重新登录后再试。');
+        } else {
+          setResult(res, 'error',
+            '保存失败，请稍后重试。若反复失败，请检查 Token 是否正确、' +
+            '以及网络是否能访问 Telegram。');
+        }
+        return;
+      }
+
+      setResult(res, 'ok',
+        '已保存 ' + tokens.length + ' 个 Bot。系统正在把它们加入你的频道，' +
+        '稍等片刻后播放时就会自动启用。');
+
+      // 重新拉一次状态，把最新列表显示出来
+      var ta2 = document.getElementById('tgpan-bots');
+      if (ta2) ta2.setAttribute('data-loaded', '0');
+      loadBots(true);
+    });
+  }
+
+  function clearBots() {
+    var res = document.getElementById('tgpan-bots-result');
+    var btn = document.getElementById('tgpan-bots-clear');
+    if (btn) { btn.disabled = true; btn.textContent = '清除中…'; }
+
+    var seq = ++botsSeq;
+    api('DELETE', '/users/bots').then(function (r) {
+      if (seq !== botsSeq) return;
+      if (btn) { btn.disabled = false; btn.textContent = '清除'; }
+
+      if (!r.ok) {
+        setResult(res, 'error', r.status === 401
+          ? '登录已失效，请刷新页面重新登录后再试。'
+          : '清除失败，请稍后重试。');
+        return;
+      }
+
+      var ta = document.getElementById('tgpan-bots');
+      if (ta) { ta.value = ''; ta.setAttribute('data-loaded', '0'); }
+      setResult(res, 'ok', '已清除全部 Bot，恢复使用你的 TG 账号拉流。');
+      loadBots(true);
+    });
   }
 
   /* ======================================================================

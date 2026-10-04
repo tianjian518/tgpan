@@ -146,6 +146,67 @@ for needle in "aria-selected" "activateTab" "openEpisodeEditor" "cssEsc" "emptyS
 done
 
 echo
+echo "==> 5.2 v2.6.0 专项检查"
+
+echo "    [Bot 页签] 前端是否含「🤖 Bot 加速」→"
+if curl -s "$BASE/tgpan-scan.js" | grep -q 'data-tab="bots"'; then
+  echo "    ✅ 找到 Bot 页签"
+else
+  echo "    ❌ 前端缺 Bot 页签"
+  exit 1
+fi
+
+echo "    [Bot 接口] 三个接口必须存在（未登录期望 401，不能是 404）→"
+for spec in "GET:/users/config" "POST:/users/bots" "DELETE:/users/bots"; do
+  m="${spec%%:*}"; p="${spec#*:}"
+  code=$(curl -s -o /dev/null -w "%{http_code}" -X "$m" \
+    -H 'Content-Type: application/json' -d '{"bots":["x"]}' "$BASE/api$p")
+  if [ "$code" = "404" ]; then
+    echo "    ❌ $m $p 返回 404 —— 路由不存在，Bot 功能不可用"
+    exit 1
+  fi
+  echo "    ✅ $m $p → HTTP $code"
+done
+
+echo "    [Bot 路径正确性] 前端不能引用不存在的 /users/stats →"
+if curl -s "$BASE/tgpan-scan.js" | grep -q "'/users/stats'"; then
+  echo "    ❌ 前端仍在调用不存在的 /users/stats（正确路径是 /users/config）"
+  exit 1
+fi
+echo "    ✅ 前端使用的是 /users/config"
+
+echo "    [Token 格式校验] 前端必须含格式校验正则 →"
+if curl -s "$BASE/tgpan-scan.js" | grep -q 'BOT_TOKEN_RE'; then
+  echo "    ✅ 含 Token 格式校验"
+else
+  echo "    ❌ 缺 Token 格式校验，用户可能提交无效 Token"
+  exit 1
+fi
+
+echo "    [WebDAV 能力声明] 未认证的 OPTIONS 也必须带 DAV 头 →"
+# 播放器（爆米花/Infuse/WinSCP/Windows 资源管理器）挂载前会先发不带凭据的
+# OPTIONS，靠响应里的 DAV 头判断「对面是不是 WebDAV 服务器」。
+# 如果 401 响应里没有 DAV 头，部分客户端会直接判挂载失败，连密码框都不弹。
+# 正确姿势：401 + WWW-Authenticate（标准质询） + DAV/Allow/Accept-Ranges（能力声明）
+opt_headers=$(curl -s -i -X OPTIONS "$BASE/webdav" 2>/dev/null)
+opt_dav=$(echo "$opt_headers" | grep -ciE '^DAV:')
+opt_auth=$(echo "$opt_headers" | grep -ciE '^WWW-Authenticate:')
+opt_ranges=$(echo "$opt_headers" | grep -ciE '^Accept-Ranges:')
+if [ "$opt_dav" -eq 0 ]; then
+  echo "    ❌ 未认证 OPTIONS 缺 DAV 头 —— 播放器会判定「不是 WebDAV 服务器」而挂载失败"
+  exit 1
+fi
+if [ "$opt_auth" -eq 0 ]; then
+  echo "    ❌ 未认证 OPTIONS 缺 WWW-Authenticate 头 —— 客户端不知道该带 Basic 凭据重试"
+  exit 1
+fi
+if [ "$opt_ranges" -eq 0 ]; then
+  echo "    ❌ 未认证 OPTIONS 缺 Accept-Ranges: bytes —— 播放器可能不支持拖进度条"
+  exit 1
+fi
+echo "    ✅ DAV / WWW-Authenticate / Accept-Ranges 三个头齐全（爆米花可正常探测）"
+
+echo
 echo "==> 6. 剧集识别引擎自测（不依赖网络）"
 echo "    在容器内跑单元测试…"
 if docker exec "$CONTAINER" sh -c 'command -v go >/dev/null 2>&1' 2>/dev/null; then
