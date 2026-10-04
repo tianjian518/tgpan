@@ -26,6 +26,17 @@ services:
       #
       # 设为 0 可关闭「真实设备身份」，回到原版网页版伪装行为
       # - TELDRIVE_TG_REAL_DEVICE=0
+      #
+      # ================================================================
+      #  登录会话（Cookie）相关
+      # ================================================================
+      # 会话有效期，默认 30 天。想「记住登录更久」就调大，例如 365d
+      # - TELDRIVE_JWT_SESSION_TIME=30d
+      #
+      # Cookie 的 SameSite 策略，默认 lax（直接 IP:端口 访问用这个就行）
+      # 如果你用反向代理 + HTTPS 域名访问，且经常从外部链接跳进来，
+      # 可设为 none，能减少「刚从微信/TG 点进来就要重新登录」的情况
+      # - TELDRIVE_JWT_COOKIE_SAMESITE=lax
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8080/api/version"]
       interval: 30s

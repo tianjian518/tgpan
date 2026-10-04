@@ -260,6 +260,130 @@ Teldrive 的搜索用了 pgroonga 的 `&@~` 操作符和 `teldrive.clean_name()`
 
 解法：基础镜像用 `groonga/pgroonga:latest-alpine-17`。
 
+### 7.5 登录卡死：AuthWs 的设计缺陷（v1.2.0 修复）
+
+**这是本项目排查耗时最久的一个问题，记录完整过程以免重蹈覆辙。**
+
+#### 现象
+
+用户手机号登录后，界面永远停在 `Please Wait...`，验证码收不到；
+后端日志几乎空白。大号小号都一样，偶发第一次能成功。
+
+#### 排查过程中的两次误判
+
+**误判一：以为是 TG 风控/限流**
+
+用户反驳："我的甲骨文刚刚连接 TG，怎么就风控、限流、拉黑了？完全说不过去。"
+—— 判断成立，此路排除。
+
+**误判二：以为是 StripPrefix 导致路由失配（v1.1.0 的错误改动）**
+
+观察 `cmd/run.go`：
+
+```go
+mux.Mount("/api/", http.StripPrefix("/api", extendedSrv))
+```
+
+openapi 里 `servers.url = "{url}/api"`，于是推测 ogen 路由表注册的是
+`/api/auth/ws`，而进中间件时 `r.URL.Path` 已被剥成 `/auth/ws`，
+`FindRoute` 必然失配。
+
+**这个推测是错的。** ogen 内部会自行处理 basePath。
+按此推测"修复"（查路由前补 `/api` 前缀）后，实测发现：
+
+```
+新版：HTTP/1.1 101 Switching Protocols   有 Accept 头 = False   ← 握手残缺！
+旧版：HTTP/1.1 101 Switching Protocols   有 Accept 头 = True    ← 正常
+```
+
+**补前缀虽然让 `FindRoute` 命中了，但破坏了 ogen 内部的参数解析，
+导致 101 响应缺少 `Sec-WebSocket-Accept` 头（假升级，浏览器会拒绝）。**
+
+→ v1.2.0 已回滚该改动。
+
+#### 真正的原因
+
+看 `pkg/services/auth.go` 的 `AuthWs`：
+
+```go
+err = tgClient.Run(ctx, func(ctx context.Context) error {
+    for {
+        message := &types.SocketMessage{}
+        err := conn.ReadJSON(message)   // ★ 消息读取在这里
+        ...
+    }
+})
+```
+
+`tgClient.Run()` **会先做 MTProto 握手连接 Telegram 服务器，成功后才进入回调**。
+
+所以当服务器连不上 Telegram 时：
+1. `Run()` 阻塞在网络握手，**不进入回调**
+2. `conn.ReadJSON()` 永远不会被调用
+3. 前端发来的 `sendcode` 消息烂在 WebSocket 缓冲区
+4. **既不处理，也不报错** —— 界面只能无限转圈
+5. 后端日志空白（因为代码根本没执行到有日志的地方）
+
+这解释得通所有现象：与账号无关、偶发成功（那次恰好连上了）、日志空白。
+
+#### 修复（v1.2.0）
+
+把「读消息」和「连 TG」解耦，并主动上报状态：
+
+```go
+var ready atomic.Bool
+
+// 1. 读消息循环独立成 goroutine，不受 TG 连接状态影响
+go func() {
+    for {
+        message := &types.SocketMessage{}
+        if err := conn.ReadJSON(message); err != nil { ... }
+        // TG 未就绪时立刻反馈，别让前端干等
+        if !ready.Load() && message.AuthType != "" {
+            _ = conn.WriteJSON(map[string]any{
+                "type":    "error",
+                "message": "尚未连接到 Telegram，请稍候重试（服务器正在建立连接）",
+            })
+            continue
+        }
+        switch message.AuthType { ... }
+    }
+}()
+
+// 2. TG 连接在后台进行，成功/失败都明确推送
+go func() {
+    err := tgClient.Run(ctx, func(ctx context.Context) error {
+        ready.Store(true)
+        _ = conn.WriteJSON(map[string]any{
+            "type": "status", "message": "已连接到 Telegram"})
+        <-ctx.Done()
+        return nil
+    })
+    if err != nil {
+        _ = conn.WriteJSON(map[string]any{
+            "type": "error", "message": "连接 Telegram 失败：" + err.Error()})
+    }
+}()
+```
+
+**实测验证**（本地容器，模拟 TG 连不上）：
+
+```
+→ 已发送 sendcode
+← 反馈1: {"message":"尚未连接到 Telegram，请稍候重试（服务器正在建立连接）","type":"error"}
+```
+
+此前为**无限静默**，现在**立即返回明确原因**。
+
+#### 经验
+
+> 写异步/网络代码时，**任何可能长时间阻塞的操作，都必须有超时或状态反馈**。
+> Teldrive 这个 `Run()` 包裹消息循环的写法，本质上把「连接可用性」
+> 和「消息处理」耦合成串行，一旦连接慢或失败，用户侧完全无法感知。
+>
+> 另外：**改动前先跑一次对照测试**。如果 v1.1.0 发布前就做过
+> "新旧版握手对比"，那个错误的补前缀改动当场就会被发现。
+
 ---
 
 ## 八、风险提示

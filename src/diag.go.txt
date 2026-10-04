@@ -31,6 +31,34 @@ type diagCheck struct {
 
 // FilesDiagHTTP 处理 /diag 请求，返回一个自包含的诊断页面
 func (e *extendedService) FilesDiagHTTP(w http.ResponseWriter, r *http.Request) {
+	// ?cookie=1：原样回显服务端看到的 Cookie 头与解析结果。
+	// 排查「前端明明带了 Cookie 却 401」这类问题的第一步 —— 先确认
+	// 服务端到底收没收到，别在后端代码里瞎猜。
+	if r.URL.Query().Get("cookie") != "" {
+		hdr := r.Header.Get("Cookie")
+		ck, err := r.Cookie(authCookieName)
+		val, e2 := "", ""
+		if err == nil {
+			val = ck.Value
+			if len(val) > 60 {
+				val = val[:60] + "..."
+			}
+		} else {
+			e2 = err.Error()
+		}
+		writeJSON(w, http.StatusOK, map[string]any{
+			"rawCookieHeader": hdr,
+			"found":           err == nil,
+			"valuePreview":    val,
+			"parseError":      e2,
+			"allHeaders":      r.Header,
+			"urlPath":         r.URL.Path,
+			"requestURI":      r.RequestURI,
+			"method":          r.Method,
+		})
+		return
+	}
+
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")
 

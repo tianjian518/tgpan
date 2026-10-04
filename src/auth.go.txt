@@ -1,0 +1,607 @@
+package services
+
+import (
+	"bytes"
+	"context"
+	"crypto/md5"
+	"encoding/base64"
+	"encoding/binary"
+	"encoding/hex"
+	"encoding/json"
+	"fmt"
+	"math/big"
+	"net"
+	"net/http"
+	"os"
+	"slices"
+	"strconv"
+	"strings"
+	"sync/atomic"
+	"time"
+
+	"github.com/go-faster/errors"
+	"github.com/golang-jwt/jwt/v5"
+	"github.com/gorilla/websocket"
+	"github.com/gotd/td/session"
+	"github.com/gotd/td/telegram"
+	tgauth "github.com/gotd/td/telegram/auth"
+	"github.com/gotd/td/telegram/auth/qrlogin"
+	"github.com/gotd/td/tg"
+	"github.com/gotd/td/tgerr"
+	"github.com/tgdrive/teldrive/internal/api"
+	"github.com/tgdrive/teldrive/internal/auth"
+	"github.com/tgdrive/teldrive/internal/cache"
+	"github.com/tgdrive/teldrive/internal/logging"
+	"github.com/tgdrive/teldrive/internal/tgc"
+	"github.com/tgdrive/teldrive/internal/utils"
+	"github.com/tgdrive/teldrive/pkg/models"
+	"github.com/tgdrive/teldrive/pkg/types"
+	"go.uber.org/zap"
+	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
+)
+
+var authCookieName = "access_token"
+
+func (a *apiService) AuthLogin(ctx context.Context, session *api.SessionCreate) (*api.AuthLoginNoContent, error) {
+
+	if !checkUserIsAllowed(a.cnf.JWT.AllowedUsers, session.UserName) {
+		return nil, &apiError{code: http.StatusForbidden, err: errors.New("user not allowed")}
+	}
+
+	now := time.Now().UTC()
+
+	jwtClaims := &types.JWTClaims{
+		Name:      session.Name,
+		UserName:  session.UserName,
+		IsPremium: session.IsPremium,
+		RegisteredClaims: jwt.RegisteredClaims{
+			Subject:   strconv.FormatInt(session.UserId, 10),
+			IssuedAt:  jwt.NewNumericDate(now),
+			ExpiresAt: jwt.NewNumericDate(now.Add(a.cnf.JWT.SessionTime)),
+		}}
+
+	tokenhash := md5.Sum([]byte(session.Session))
+	hexToken := hex.EncodeToString(tokenhash[:])
+	jwtClaims.Hash = hexToken
+
+	jwtToken, err := auth.Encode(a.cnf.JWT.Secret, jwtClaims)
+
+	if err != nil {
+		return nil, &apiError{err: err}
+	}
+
+	user := models.User{
+		UserId:    session.UserId,
+		Name:      session.Name,
+		UserName:  session.UserName,
+		IsPremium: session.IsPremium,
+	}
+
+	err = a.db.Transaction(func(tx *gorm.DB) error {
+
+		if err := a.db.Clauses(clause.OnConflict{DoNothing: true}).Create(&user).Error; err != nil {
+			return err
+		}
+		file := &models.File{
+			Name:      "root",
+			Type:      "folder",
+			MimeType:  "drive/folder",
+			UserId:    session.UserId,
+			Status:    "active",
+			UpdatedAt: utils.Ptr(time.Now().UTC()),
+		}
+		if err := a.db.Clauses(clause.OnConflict{DoNothing: true}).Create(file).Error; err != nil {
+			return err
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, &apiError{err: err}
+	}
+	client, err := tgc.AuthClient(ctx, &a.cnf.TG, session.Session, a.newMiddlewares(ctx, 5)...)
+	if err != nil {
+		return nil, &apiError{err: err}
+	}
+
+	var auth *tg.Authorization
+
+	err = client.Run(ctx, func(ctx context.Context) error {
+		auths, err := client.API().AccountGetAuthorizations(ctx)
+		if err != nil {
+			return err
+		}
+		for _, a := range auths.Authorizations {
+			if a.Current {
+				auth = &a
+				break
+			}
+		}
+		return nil
+	})
+
+	if err != nil {
+		return nil, &apiError{err: err}
+	}
+
+	if err := a.db.Create(&models.Session{UserId: session.UserId, Hash: hexToken,
+		Session: session.Session, SessionDate: auth.DateCreated}).Error; err != nil {
+		return nil, &apiError{err: err}
+	}
+	return &api.AuthLoginNoContent{SetCookie: setCookie(authCookieName, jwtToken, int(a.cnf.JWT.SessionTime.Seconds()))}, nil
+}
+
+func (a *apiService) AuthLogout(ctx context.Context) (*api.AuthLogoutNoContent, error) {
+	authUser := auth.GetJWTUser(ctx)
+	client, _ := tgc.AuthClient(ctx, &a.cnf.TG, authUser.TgSession, a.newMiddlewares(ctx, 5)...)
+	tgc.RunWithAuth(ctx, client, "", func(ctx context.Context) error {
+		_, err := client.API().AuthLogOut(ctx)
+		return err
+	})
+	a.db.Where("hash = ?", authUser.Hash).Delete(&models.Session{})
+	userId, _ := strconv.ParseInt(authUser.Subject, 10, 64)
+	a.cache.Delete(ctx, cache.KeySessionHash(authUser.Hash), cache.KeyUserSessions(userId))
+	return &api.AuthLogoutNoContent{SetCookie: setCookie(authCookieName, "", -1)}, nil
+}
+
+func (a *apiService) AuthSession(ctx context.Context, params api.AuthSessionParams) (api.AuthSessionRes, error) {
+	if params.AccessToken.Value == "" {
+		return &api.AuthSessionNoContent{}, nil
+	}
+	claims, err := auth.VerifyUser(ctx, a.db, a.cache, a.cnf.JWT.Secret, params.AccessToken.Value)
+
+	if err != nil {
+		return &api.AuthSessionNoContent{}, nil
+	}
+
+	claims.TgSession = ""
+
+	now := time.Now().UTC()
+
+	newExpires := now.Add(a.cnf.JWT.SessionTime)
+
+	userId, _ := strconv.ParseInt(claims.Subject, 10, 64)
+
+	session := api.Session{
+		Name:     claims.Name,
+		UserName: claims.UserName,
+		UserId:   userId,
+		Hash:     claims.Hash,
+		Expires:  newExpires}
+
+	claims.IssuedAt = jwt.NewNumericDate(now)
+
+	claims.ExpiresAt = jwt.NewNumericDate(newExpires)
+
+	jweToken, err := auth.Encode(a.cnf.JWT.Secret, claims)
+
+	if err != nil {
+		return &api.AuthSessionNoContent{}, nil
+	}
+	return &api.SessionHeaders{SetCookie: setCookie(authCookieName, jweToken, int(a.cnf.JWT.SessionTime.Seconds())),
+		Response: session}, nil
+}
+
+func (a *apiService) AuthWs(ctx context.Context) error {
+	return nil
+}
+
+func (e *extendedService) AuthWs(w http.ResponseWriter, r *http.Request) {
+	// ---------------------------------------------------------------------
+	//  【重要】这里不能直接用 r.Context()！
+	//
+	//  r.Context() 是 HTTP 请求的上下文，WebSocket 场景下它是「不可靠」的：
+	//  一旦 HTTP handler 返回（或代理/网关认为请求结束），r.Context() 就会
+	//  被 cancel。此时所有拿这个 ctx 发起的 TG 调用（比如 SendCode 发验证码）
+	//  都会在到达 Telegram 之前被中断。
+	//
+	//  症状：点了登录，前端转圈，TG 那边收不到任何请求 —— 验证码自然收不到。
+	//
+	//  正确做法：自己建一个 context，只在「WebSocket 连接断开」时取消。
+	// ---------------------------------------------------------------------
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	upgrader := websocket.Upgrader{
+		CheckOrigin: func(r *http.Request) bool {
+			return true
+		},
+	}
+
+	logger := logging.Component("AUTH").With(
+		zap.String("remote_addr", r.RemoteAddr),
+		zap.String("auth_method", "qr"),
+	)
+	conn, err := upgrader.Upgrade(w, r, nil)
+	if err != nil {
+		logger.Error("websocket.upgrade_failed", zap.Error(err))
+		http.Error(w, "could not upgrade connection", http.StatusBadRequest)
+		return
+	}
+
+	defer func() {
+		if err := conn.Close(); err != nil {
+			logger.Error("websocket.close_failed", zap.Error(err))
+		}
+	}()
+
+	dispatcher := tg.NewUpdateDispatcher()
+	loggedIn := qrlogin.OnLoginToken(dispatcher)
+	sessionStorage := &session.StorageMemory{}
+	tgClient, err := tgc.NoAuthClient(ctx, &e.api.cnf.TG, dispatcher, sessionStorage)
+	if err != nil {
+		logger.Error("telegram.client_create_failed", zap.Error(err))
+		_ = conn.WriteJSON(map[string]any{
+			"type":    "error",
+			"message": "TG 客户端创建失败：" + err.Error(),
+		})
+		return
+	}
+
+	// ---------------------------------------------------------------------
+	//  先把「消息读取循环」跑起来，再做 TG 连接。
+	//
+	//  原因：tgClient.Run() 内部会先连 Telegram 服务器（MTProto 握手），
+	//        连不上时 Run 不会进入回调，conn.ReadJSON 就永远不会被调用 ——
+	//        前端发的 sendcode 消息会烂在缓冲区里，表现为界面一直 "Please Wait..."、
+	//        后端一行日志都没有。用户完全不知道卡在哪。
+	//
+	//  改成并行：读取循环立刻开跑，TG 连接在后台进行，并把进度实时推给前端。
+	// ---------------------------------------------------------------------
+
+	// ---------------------------------------------------------------------
+	//  ready 标记：只用于「状态提示」，绝不拦截消息！
+	//
+	//  教训（v1.2.0 的严重设计错误）：
+	//  曾经写成——TG 未就绪时直接丢弃消息并回错误。结果是：
+	//    1. 前端页面加载会立刻发 {"authType":"qr"}，那时 TG 通常还没连上，
+	//       这条消息被丢弃；
+	//    2. 用户很快点登录发的 sendcode，也可能赶上 ready 仍为 false 而被丢弃；
+	//    3. 前端只把 {"type":"error"} 当 toast 显示，不会重置按钮的 isLoading，
+	//       于是按钮永远卡在加载态 —— 表现为「点了没有任何反应」。
+	//
+	//  正确做法：消息一律交给对应的 handler。tgClient 内部会自行排队等待
+	//  连接就绪，不需要我们在外面拦。
+	// ---------------------------------------------------------------------
+
+	// ready 标记 TG 连接是否就绪（仅用于状态展示，不参与拦截逻辑）
+	var ready atomic.Bool
+
+	// 读消息循环：独立 goroutine，不受 TG 连接状态影响
+	go func() {
+		defer cancel() // 连接断开 → 取消 ctx，释放 TG 连接与所有在途请求
+		for {
+			message := &types.SocketMessage{}
+			if err := conn.ReadJSON(message); err != nil {
+				if websocket.IsCloseError(err, websocket.CloseNormalClosure, websocket.CloseGoingAway) {
+					logger.Debug("websocket connection closed normally by client")
+					return
+				}
+				return
+			}
+			logger.Info("auth.ws_message_received",
+				zap.String("auth_type", message.AuthType),
+				zap.String("message", message.Message),
+				zap.Bool("tg_ready", ready.Load()),
+				zap.Bool("has_phone", message.PhoneNo != ""))
+			recordAuthEvent("info", "收到前端消息",
+				fmt.Sprintf("authType=%q message=%q phoneNo=%q tgReady=%v",
+					message.AuthType, message.Message, maskPhone(message.PhoneNo), ready.Load()))
+
+			// 一律交给 handler 处理（不拦截）
+			switch message.AuthType {
+			case "qr":
+				go e.handleQRAuth(ctx, conn, tgClient, loggedIn, sessionStorage, logger)
+			case "phone":
+				go e.handlePhoneAuth(ctx, conn, tgClient, message, sessionStorage, logger)
+			case "2fa":
+				if message.Password != "" {
+					go e.handle2FAAuth(ctx, conn, tgClient, message.Password, sessionStorage, logger)
+				}
+			}
+		}
+	}()
+
+	// TG 连接在后台跑，失败时明确告知前端
+	go func() {
+		recordAuthEvent("info", "开始连接 Telegram", "")
+		tRun := time.Now()
+		err := tgClient.Run(ctx, func(ctx context.Context) error {
+			// 进入这里说明已成功连上 Telegram
+			ready.Store(true)
+			recordAuthEvent("info", "已连接到 Telegram",
+				"握手耗时 "+time.Since(tRun).Round(time.Millisecond).String())
+			_ = conn.WriteJSON(map[string]any{
+				"type":    "status",
+				"message": "已连接到 Telegram",
+			})
+			logger.Info("auth.tg_connected")
+			<-ctx.Done()
+			return nil
+		})
+		if err != nil {
+			recordAuthEvent("error", "连接 Telegram 失败："+err.Error(),
+				"耗时 "+time.Since(tRun).Round(time.Millisecond).String())
+			logger.Error("telegram.client_run_failed", zap.Error(err))
+			_ = conn.WriteJSON(map[string]any{
+				"type":    "error",
+				"message": "连接 Telegram 失败：" + err.Error(),
+			})
+		}
+	}()
+
+	// 保持连接存活，直到客户端断开
+	<-ctx.Done()
+}
+
+func (e *extendedService) handleQRAuth(ctx context.Context, conn *websocket.Conn, tgClient *telegram.Client, loggedIn qrlogin.LoggedIn, sessionStorage session.Storage, logger *zap.Logger) {
+	authorization, err := tgClient.QR().Auth(ctx, loggedIn, func(ctx context.Context, token qrlogin.Token) error {
+		conn.WriteJSON(map[string]any{"type": "auth", "payload": map[string]string{"token": token.URL()}})
+		return nil
+	})
+
+	if errors.Is(err, context.Canceled) {
+		return
+	}
+	if tgerr.Is(err, "SESSION_PASSWORD_NEEDED") {
+		conn.WriteJSON(map[string]any{"type": "auth", "message": "2FA required"})
+		return
+	}
+
+	if err != nil {
+		logger.Error("auth.qr_login_failed", zap.Error(err))
+		conn.WriteJSON(map[string]any{"type": "error", "message": err.Error()})
+		return
+	}
+	user, ok := authorization.User.AsNotEmpty()
+	if !ok {
+		conn.WriteJSON(map[string]any{"type": "error", "message": "auth failed"})
+		return
+	}
+	if !checkUserIsAllowed(e.api.cnf.JWT.AllowedUsers, user.Username) {
+		conn.WriteJSON(map[string]any{"type": "error", "message": "user not allowed"})
+		_, _ = tgClient.API().AuthLogOut(ctx)
+		return
+	}
+	res, _ := sessionStorage.LoadSession(ctx)
+	sessionData := &types.SessionData{}
+	json.Unmarshal(res, sessionData)
+	session := prepareSession(user, &sessionData.Data)
+	conn.WriteJSON(map[string]any{"type": "auth", "payload": session, "message": "success"})
+}
+
+func (e *extendedService) handlePhoneAuth(ctx context.Context, conn *websocket.Conn, tgClient *telegram.Client, message *types.SocketMessage, sessionStorage session.Storage, logger *zap.Logger) {
+	switch message.Message {
+	case "sendcode":
+		recordAuthEvent("info", "开始请求验证码",
+			"手机号 "+maskPhone(message.PhoneNo))
+		t0 := time.Now()
+		res, err := tgClient.Auth().SendCode(ctx, message.PhoneNo, tgauth.SendCodeOptions{})
+		if errors.Is(err, context.Canceled) {
+			recordAuthEvent("error", "请求被取消（ctx canceled）",
+				"说明连接可能已断开；耗时 "+time.Since(t0).Round(time.Millisecond).String())
+			return
+		}
+
+		if err != nil {
+			recordAuthEvent("error", "TG 拒绝发码："+err.Error(),
+				"耗时 "+time.Since(t0).Round(time.Millisecond).String()+
+					"（这条错误原文就是答案）")
+			logger.Error("auth.phone_code_failed", zap.Error(err), zap.String("phone", message.PhoneNo))
+			conn.WriteJSON(map[string]any{"type": "error", "message": err.Error()})
+			return
+		}
+		code := res.(*tg.AuthSentCode)
+		// 把 TG 给的下一次发送方式与超时也记下来：
+		// 如果当前方式（通常是 App）收不到，用户可以用 resendcode 触发换一种方式
+		extra := ""
+		if nt, ok := code.GetNextType(); ok {
+			extra = fmt.Sprintf(" 下次可切换为 %T", nt)
+		}
+		if code.Timeout > 0 {
+			extra += fmt.Sprintf(" 超时=%ds", code.Timeout)
+		}
+		recordAuthEvent("info", "TG 已发出验证码",
+			fmt.Sprintf("type=%T hash长度=%d 耗时=%s%s",
+				code.Type, len(code.PhoneCodeHash), time.Since(t0).Round(time.Millisecond), extra))
+		conn.WriteJSON(map[string]any{"type": "auth", "payload": map[string]string{"phoneCodeHash": code.PhoneCodeHash}})
+	case "resendcode":
+		// 换一种方式重发验证码（例如 App 收不到 → 改走短信）
+		recordAuthEvent("info", "请求重发验证码",
+			"手机号 "+maskPhone(message.PhoneNo)+" hash="+shortHash(message.PhoneCodeHash))
+		t1 := time.Now()
+		res, err := tgClient.API().AuthResendCode(ctx, &tg.AuthResendCodeRequest{
+			PhoneNumber:   message.PhoneNo,
+			PhoneCodeHash: message.PhoneCodeHash,
+		})
+		if err != nil {
+			recordAuthEvent("error", "重发失败："+err.Error(),
+				"耗时 "+time.Since(t1).Round(time.Millisecond).String())
+			conn.WriteJSON(map[string]any{"type": "error", "message": err.Error()})
+			return
+		}
+		if sent, ok := res.(*tg.AuthSentCode); ok {
+			recordAuthEvent("info", "重发成功，TG 已用新方式发出",
+				fmt.Sprintf("type=%T 耗时=%s", sent.Type, time.Since(t1).Round(time.Millisecond)))
+			conn.WriteJSON(map[string]any{"type": "auth", "payload": map[string]string{
+				"phoneCodeHash": sent.PhoneCodeHash,
+				"resent":        "1",
+				"resentType":    fmt.Sprintf("%T", sent.Type),
+			}})
+			return
+		}
+		recordAuthEvent("info", "重发成功", fmt.Sprintf("返回类型 %T", res))
+		conn.WriteJSON(map[string]any{"type": "auth", "payload": map[string]string{"resent": "1"}})
+	case "signin":
+		recordAuthEvent("info", "开始提交验证码", "手机号 "+maskPhone(message.PhoneNo))
+		auth, err := tgClient.Auth().SignIn(ctx, message.PhoneNo, message.PhoneCode, message.PhoneCodeHash)
+		if errors.Is(err, context.Canceled) {
+			return
+		}
+		if errors.Is(err, tgauth.ErrPasswordAuthNeeded) {
+			conn.WriteJSON(map[string]any{"type": "auth",
+				"message": tgauth.ErrPasswordAuthNeeded.Error()})
+			return
+		}
+		if tgerr.Is(err, "PHONE_CODE_INVALID") {
+			conn.WriteJSON(map[string]any{"type": "auth", "message": "PHONE_CODE_INVALID"})
+			return
+		}
+		if err != nil {
+			logger.Error("auth.phone_signin_failed", zap.Error(err), zap.String("phone", message.PhoneNo))
+			conn.WriteJSON(map[string]any{"type": "error", "message": err.Error()})
+			return
+		}
+		user, ok := auth.User.AsNotEmpty()
+		if !ok {
+			conn.WriteJSON(map[string]any{"type": "error", "message": "auth failed"})
+			return
+		}
+		if !checkUserIsAllowed(e.api.cnf.JWT.AllowedUsers, user.Username) {
+			conn.WriteJSON(map[string]any{"type": "error", "message": "user not allowed"})
+			_, _ = tgClient.API().AuthLogOut(ctx)
+			return
+		}
+		res, _ := sessionStorage.LoadSession(ctx)
+		sessionData := &types.SessionData{}
+		json.Unmarshal(res, sessionData)
+		session := prepareSession(user, &sessionData.Data)
+		conn.WriteJSON(map[string]any{"type": "auth", "payload": session, "message": "success"})
+	}
+}
+
+func (e *extendedService) handle2FAAuth(ctx context.Context, conn *websocket.Conn, tgClient *telegram.Client, password string, sessionStorage session.Storage, logger *zap.Logger) {
+	auth, err := tgClient.Auth().Password(ctx, password)
+	if errors.Is(err, context.Canceled) {
+		return
+	}
+	if err != nil {
+		logger.Error("auth.2fa_failed", zap.Error(err))
+		conn.WriteJSON(map[string]any{"type": "error", "message": err.Error()})
+		return
+	}
+	user, ok := auth.User.AsNotEmpty()
+	if !ok {
+		conn.WriteJSON(map[string]any{"type": "error", "message": "auth failed"})
+		return
+	}
+	if !checkUserIsAllowed(e.api.cnf.JWT.AllowedUsers, user.Username) {
+		conn.WriteJSON(map[string]any{"type": "error", "message": "user not allowed"})
+		_, _ = tgClient.API().AuthLogOut(ctx)
+		return
+	}
+	res, _ := sessionStorage.LoadSession(ctx)
+	sessionData := &types.SessionData{}
+	json.Unmarshal(res, sessionData)
+	session := prepareSession(user, &sessionData.Data)
+	conn.WriteJSON(map[string]any{"type": "auth", "payload": session, "message": "success"})
+}
+
+func ip4toInt(ipv4Address net.IP) int64 {
+	IPv4Int := big.NewInt(0)
+	IPv4Int.SetBytes(ipv4Address.To4())
+	return IPv4Int.Int64()
+}
+
+func pack32BinaryIP4(ip4Address string) []byte {
+	ipv4Decimal := ip4toInt(net.ParseIP(ip4Address))
+
+	buf := new(bytes.Buffer)
+	binary.Write(buf, binary.BigEndian, uint32(ipv4Decimal))
+	return buf.Bytes()
+}
+
+func generateTgSession(dcId int, authKey []byte, port int) string {
+
+	dcMaps := map[int]string{
+		1: "149.154.175.53",
+		2: "149.154.167.51",
+		3: "149.154.175.100",
+		4: "149.154.167.91",
+		5: "91.108.56.130",
+	}
+
+	dcIDByte := byte(dcId)
+	serverAddressBytes := pack32BinaryIP4(dcMaps[dcId])
+	portByte := make([]byte, 2)
+	binary.BigEndian.PutUint16(portByte, uint16(port))
+
+	packet := make([]byte, 0)
+	packet = append(packet, dcIDByte)
+	packet = append(packet, serverAddressBytes...)
+	packet = append(packet, portByte...)
+	packet = append(packet, authKey...)
+
+	base64Encoded := base64.URLEncoding.EncodeToString(packet)
+	return "1" + base64Encoded
+}
+
+func checkUserIsAllowed(allowedUsers []string, userName string) bool {
+	found := false
+	if len(allowedUsers) > 0 {
+		if slices.Contains(allowedUsers, userName) {
+			found = true
+		}
+	} else {
+		found = true
+	}
+	return found
+}
+
+func prepareSession(user *tg.User, data *session.Data) *api.SessionCreate {
+	sessionString := generateTgSession(data.DC, data.AuthKey, 443)
+	session := &api.SessionCreate{
+		Session:   sessionString,
+		UserId:    user.ID,
+		UserName:  user.Username,
+		Name:      fmt.Sprintf("%s %s", user.FirstName, user.LastName),
+		IsPremium: user.Premium,
+	}
+	return session
+}
+
+// setCookie 构造登录/退出用的会话 Cookie。
+//
+// 相比原版实现的加固点（都是为了让「换标签页/换浏览器/重启后」尽量保持登录）：
+//
+//  1. 显式写 Expires。只给 MaxAge 时，部分浏览器把它当作「会话 Cookie」，
+//     关掉浏览器就丢；给了 Expires 才会真正落盘持久化。
+//  2. SameSite 从 Lax 放宽到 None 时需要 Secure，HTTP 下会被浏览器直接丢掉，
+//     所以这里保持 Lax，但通过环境变量 TELDRIVE_JWT_COOKIE_SAMESITE 可调。
+//  3. 增加 Expires 与 MaxAge 的「双保险」：maxAge <= 0 时视为清除 Cookie。
+func setCookie(name, value string, maxAge int) string {
+	cookie := http.Cookie{
+		Name:     name,
+		Value:    value,
+		MaxAge:   maxAge,
+		HttpOnly: true,
+		Path:     "/",
+		SameSite: cookieSameSiteMode(),
+	}
+	if maxAge > 0 {
+		// 显式过期时间，让浏览器把它当持久化 Cookie 落盘。
+		cookie.Expires = time.Now().Add(time.Duration(maxAge) * time.Second)
+	} else {
+		cookie.Expires = time.Unix(0, 0)
+	}
+	return cookie.String()
+}
+
+// cookieSameSiteMode 允许通过环境变量微调 SameSite 策略。
+//
+// 背景：SameSite=Lax 在「从外部站点跳转进来」的首次请求上不会携带 Cookie，
+// 表现为「刚从 TG / 微信里的链接点进来，就要求重新登录」。
+// 如果你通过反向代理（例如 https 域名）访问，可设为 none 并确保走 HTTPS；
+// 直接 IP:端口 访问的场景保持 lax 即可。
+func cookieSameSiteMode() http.SameSite {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("TELDRIVE_JWT_COOKIE_SAMESITE"))) {
+	case "none":
+		return http.SameSiteNoneMode
+	case "strict":
+		return http.SameSiteStrictMode
+	case "lax", "":
+		return http.SameSiteLaxMode
+	default:
+		return http.SameSiteLaxMode
+	}
+}
