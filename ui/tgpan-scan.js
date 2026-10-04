@@ -17,143 +17,242 @@
   window.__tgpanConsoleInjected = true;
 
   var ACCENT = '#2b7de9';
+  // 语义色收进变量，暗色模式统一切换，避免满屏硬编码
+  var OK_BG = 'var(--tgpan-ok-bg,#eafaf0)', OK_FG = 'var(--tgpan-ok-fg,#0a7a3d)', OK_BD = 'var(--tgpan-ok-bd,#b7e6c9)';
+  var ER_BG = 'var(--tgpan-er-bg,#fdecec)', ER_FG = 'var(--tgpan-er-fg,#b3261e)', ER_BD = 'var(--tgpan-er-bd,#f5c2c0)';
+  var LD_BG = 'var(--tgpan-ld-bg,#eef7fe)', LD_FG = 'var(--tgpan-ld-fg,#1a73b5)', LD_BD = 'var(--tgpan-ld-bd,#c4e2f7)';
 
   var STYLE = [
+    /* --- 浮标 --- */
     '#tgpan-fab{position:fixed;right:24px;bottom:24px;z-index:99998;',
     'background:' + ACCENT + ';color:#fff;border:none;',
-    'border-radius:8px;padding:13px 20px;font-size:15px;font-weight:500;cursor:pointer;',
-    'box-shadow:0 4px 14px rgba(43,125,233,.4);display:flex;align-items:center;gap:8px;',
-    'transition:transform .15s,box-shadow .15s;font-family:inherit}',
-    '#tgpan-fab:hover{transform:translateY(-2px);box-shadow:0 8px 22px rgba(43,125,233,.5)}',
+    'border-radius:10px;padding:13px 20px;font-size:15px;font-weight:500;cursor:pointer;',
+    'box-shadow:0 4px 14px rgba(43,125,233,.38);display:flex;align-items:center;gap:8px;',
+    'transition:transform .16s cubic-bezier(.4,0,.2,1),box-shadow .16s;font-family:inherit}',
+    '#tgpan-fab:hover{transform:translateY(-2px);box-shadow:0 10px 24px rgba(43,125,233,.46)}',
+    '#tgpan-fab:focus-visible{outline:2px solid #fff;outline-offset:-4px}',
 
-    '#tgpan-mask{position:fixed;inset:0;background:rgba(0,0,0,.5);z-index:99999;',
-    'display:none;align-items:center;justify-content:center;padding:16px}',
-    '#tgpan-mask.show{display:flex}',
+    /* --- 遮罩与容器 --- */
+    '#tgpan-mask{position:fixed;inset:0;background:rgba(15,20,28,.52);z-index:99999;',
+    'display:none;align-items:center;justify-content:center;padding:16px;',
+    'backdrop-filter:blur(2px)}',
+    '#tgpan-mask.show{display:flex;animation:tgpan-fade .18s ease-out}',
+    '@keyframes tgpan-fade{from{opacity:0}to{opacity:1}}',
     '#tgpan-box{background:var(--color-surface-container,#fff);',
     'color:var(--color-on-surface,#111);',
-    'border-radius:12px;width:100%;max-width:680px;',
+    'border-radius:14px;width:100%;max-width:680px;',
     'max-height:88vh;overflow:hidden;display:flex;flex-direction:column;',
-    'box-shadow:0 20px 60px rgba(0,0,0,.28);',
+    'box-shadow:0 24px 64px rgba(0,0,0,.3);',
     'font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif}',
+    '#tgpan-mask.show #tgpan-box{animation:tgpan-pop .2s cubic-bezier(.34,1.3,.64,1)}',
+    '@keyframes tgpan-pop{from{transform:scale(.97);opacity:.6}to{transform:scale(1);opacity:1}}',
 
+    /* --- 头部：字号收敛到 20 / 16 / 14 / 12 四档 --- */
     '#tgpan-head{padding:20px 24px 0;flex-shrink:0}',
-    '#tgpan-head h3{margin:0 0 4px;font-size:19px;font-weight:600;display:flex;align-items:center;gap:8px}',
-    '#tgpan-head .sub{color:var(--color-on-surface-variant,#888);font-size:13px;line-height:1.6}',
+    '#tgpan-head h3{margin:0 0 4px;font-size:20px;font-weight:600;letter-spacing:-.2px;',
+    'display:flex;align-items:center;gap:8px}',
+    '#tgpan-head .sub{color:var(--color-on-surface-variant,#7a7f87);font-size:13px;line-height:1.6}',
 
-    '#tgpan-tabs{display:flex;gap:4px;margin:16px 0 0;border-bottom:1px solid var(--color-outline-variant,#eee);',
-    'padding:0 24px;flex-shrink:0;overflow-x:auto}',
-    '.tgpan-tab{padding:9px 14px;font-size:14px;cursor:pointer;border:none;background:none;',
-    'color:var(--color-on-surface-variant,#666);font-family:inherit;white-space:nowrap;',
-    'border-bottom:2px solid transparent;margin-bottom:-1px;transition:color .15s}',
+    /* --- 页签 --- */
+    '#tgpan-tabs{display:flex;gap:2px;margin:16px 0 0;',
+    'border-bottom:1px solid var(--color-outline-variant,#eceef1);',
+    'padding:0 24px;flex-shrink:0;overflow-x:auto;scrollbar-width:none}',
+    '#tgpan-tabs::-webkit-scrollbar{display:none}',
+    '.tgpan-tab{padding:10px 14px;font-size:14px;cursor:pointer;border:none;background:none;',
+    'color:var(--color-on-surface-variant,#6b7280);font-family:inherit;white-space:nowrap;',
+    'border-bottom:2px solid transparent;margin-bottom:-1px;transition:color .15s,border-color .15s}',
     '.tgpan-tab:hover{color:' + ACCENT + '}',
+    '.tgpan-tab:focus-visible{outline:2px solid ' + ACCENT + ';outline-offset:-2px;border-radius:6px 6px 0 0}',
     '.tgpan-tab.active{color:' + ACCENT + ';border-bottom-color:' + ACCENT + ';font-weight:600}',
 
+    /* --- 主体 --- */
     '#tgpan-body{padding:20px 24px;overflow-y:auto;flex:1}',
     '.tgpan-pane{display:none}',
-    '.tgpan-pane.active{display:block}',
+    '.tgpan-pane.active{display:block;animation:tgpan-slide .18s ease-out}',
+    '@keyframes tgpan-slide{from{opacity:0;transform:translateY(4px)}to{opacity:1;transform:none}}',
 
-    '.tgpan-field{margin-bottom:15px}',
-    '.tgpan-field label{display:block;font-size:13px;font-weight:600;margin-bottom:6px}',
-    '.tgpan-field .hint{font-weight:400;color:var(--color-on-surface-variant,#999);font-size:12px}',
+    /* --- 表单 --- */
+    '.tgpan-field{margin-bottom:16px}',
+    '.tgpan-field label{display:block;font-size:14px;font-weight:600;margin-bottom:6px}',
+    '.tgpan-field .hint{font-weight:400;color:var(--color-on-surface-variant,#9096a0);font-size:12px}',
     '.tgpan-field input{width:100%;box-sizing:border-box;padding:10px 13px;',
-    'border:1.5px solid var(--color-outline,#e0e0e0);border-radius:6px;font-size:14px;',
-    'outline:none;transition:border-color .15s;font-family:inherit;',
+    'border:1.5px solid var(--color-outline,#e2e5e9);border-radius:8px;font-size:14px;',
+    'outline:none;transition:border-color .15s,box-shadow .15s;font-family:inherit;',
     'background:var(--color-surface,#fff);color:var(--color-on-surface,#111)}',
-    '.tgpan-field input:focus{border-color:' + ACCENT + '}',
+    '.tgpan-field input:focus{border-color:' + ACCENT + ';box-shadow:0 0 0 3px rgba(43,125,233,.12)}',
 
+    /* --- 开关 --- */
     '.tgpan-switch{display:inline-flex;align-items:center;gap:8px;cursor:pointer;user-select:none}',
     '.tgpan-switch input{display:none}',
-    '.tgpan-switch .track{width:38px;height:21px;border-radius:11px;background:#ccc;',
+    '.tgpan-switch .track{width:38px;height:21px;border-radius:11px;background:#cfd3d8;',
     'position:relative;transition:background .2s;flex:0 0 auto}',
     '.tgpan-switch .track::after{content:"";position:absolute;top:2px;left:2px;width:17px;height:17px;',
-    'border-radius:50%;background:#fff;transition:transform .2s;box-shadow:0 1px 3px rgba(0,0,0,.2)}',
+    'border-radius:50%;background:#fff;transition:transform .2s;box-shadow:0 1px 3px rgba(0,0,0,.22)}',
     '.tgpan-switch input:checked+.track{background:' + ACCENT + '}',
     '.tgpan-switch input:checked+.track::after{transform:translateX(17px)}',
+    '.tgpan-switch input:focus-visible+.track{outline:2px solid ' + ACCENT + ';outline-offset:2px}',
 
-    '.tgpan-btn{padding:10px 18px;border-radius:6px;border:none;font-size:14px;font-weight:500;',
-    'cursor:pointer;font-family:inherit;transition:opacity .15s}',
-    '.tgpan-btn:hover{opacity:.86}',
-    '.tgpan-btn:disabled{opacity:.5;cursor:not-allowed}',
+    /* --- 按钮：统一圆角 8、补 focus-visible --- */
+    '.tgpan-btn{padding:10px 18px;border-radius:8px;border:1px solid transparent;font-size:14px;',
+    'font-weight:500;cursor:pointer;font-family:inherit;',
+    'transition:background .15s,border-color .15s,opacity .15s}',
+    '.tgpan-btn:hover{opacity:.9}',
+    '.tgpan-btn:focus-visible{outline:2px solid ' + ACCENT + ';outline-offset:2px}',
+    '.tgpan-btn:disabled{opacity:.45;cursor:not-allowed}',
     '.tgpan-btn.primary{background:' + ACCENT + ';color:#fff}',
-    '.tgpan-btn.ghost{background:var(--color-surface-container-high,#f0f0f0);',
-    'color:var(--color-on-surface,#444)}',
+    '.tgpan-btn.primary:hover{background:#1f6fd6}',
+    '.tgpan-btn.ghost{background:var(--color-surface-container-high,#f4f5f7);',
+    'border-color:var(--color-outline-variant,#dfe3e8);',
+    'color:var(--color-on-surface,#3d4450)}',
+    '.tgpan-btn.ghost:hover{background:var(--color-surface-container-highest,#e9ecf1)}',
     '.tgpan-btn.danger{background:#e64545;color:#fff}',
-    '.tgpan-btn.sm{padding:7px 13px;font-size:13px}',
+    '.tgpan-btn.danger:hover{background:#d33838}',
+    '.tgpan-btn.sm{padding:7px 13px;font-size:13px;border-radius:7px}',
     '#tgpan-actions{display:flex;gap:10px;margin-top:20px}',
     '#tgpan-actions .tgpan-btn{flex:1}',
 
-    '.tgpan-result{margin-top:16px;padding:13px;border-radius:8px;font-size:13px;',
-    'line-height:1.75;display:none;white-space:pre-wrap;word-break:break-word}',
-    '.tgpan-result.ok{background:#eafaf0;color:#0a7a3d;border:1px solid #b7e6c9;display:block}',
-    '.tgpan-result.err{background:#fdecec;color:#b3261e;border:1px solid #f5c2c0;display:block}',
-    '.tgpan-result.load{background:#eef7fe;color:#1a73b5;border:1px solid #c4e2f7;display:block}',
+    /* --- 结果提示 --- */
+    '.tgpan-result{margin-top:16px;padding:13px 15px;border-radius:9px;font-size:13px;',
+    'line-height:1.75;display:none;white-space:pre-wrap;word-break:break-word;',
+    'border-left:3px solid transparent}',
+    '.tgpan-result.ok{background:' + OK_BG + ';color:' + OK_FG + ';border-color:' + OK_BD + ';display:block}',
+    '.tgpan-result.err{background:' + ER_BG + ';color:' + ER_FG + ';border-color:' + ER_BD + ';display:block}',
+    '.tgpan-result.load{background:' + LD_BG + ';color:' + LD_FG + ';border-color:' + LD_BD + ';display:block}',
+    '.tgpan-result.load::before{content:"";display:inline-block;width:11px;height:11px;',
+    'margin-right:7px;vertical-align:-1px;border:2px solid currentColor;border-right-color:transparent;',
+    'border-radius:50%;animation:tgpan-spin .7s linear infinite}',
+    '@keyframes tgpan-spin{to{transform:rotate(360deg)}}',
 
-    '.tgpan-help{margin-top:14px;padding:12px 14px;background:var(--color-surface-container-low,#f8f9fa);',
-    'border-radius:8px;font-size:12.5px;color:var(--color-on-surface-variant,#666);line-height:1.85}',
-    '.tgpan-help b{color:var(--color-on-surface,#333)}',
+    /* --- 帮助块 --- */
+    '.tgpan-help{margin-top:14px;padding:13px 15px;background:var(--color-surface-container-low,#f7f8fa);',
+    'border-radius:9px;font-size:13px;color:var(--color-on-surface-variant,#5c636e);line-height:1.85}',
+    '.tgpan-help b{color:var(--color-on-surface,#2b313b)}',
     '.tgpan-help code{background:var(--color-surface-container-high,#e8eaed);padding:1px 6px;',
-    'border-radius:4px;font-size:11.5px;font-family:ui-monospace,Menlo,Consolas,monospace}',
+    'border-radius:4px;font-size:12px;font-family:ui-monospace,Menlo,Consolas,monospace}',
 
-    '.tgpan-ch{display:flex;align-items:center;gap:12px;padding:13px 14px;border-radius:8px;',
-    'border:1px solid var(--color-outline-variant,#eaeaea);margin-bottom:9px;',
-    'background:var(--color-surface-container-low,#fafbfc)}',
+    /* --- 频道卡片 --- */
+    '.tgpan-ch{display:flex;align-items:center;gap:12px;padding:13px 15px;border-radius:10px;',
+    'border:1px solid var(--color-outline-variant,#e8ebef);margin-bottom:10px;',
+    'background:var(--color-surface-container-low,#fafbfc);transition:border-color .15s}',
+    '.tgpan-ch:hover{border-color:var(--color-outline,#d6dae0)}',
     '.tgpan-ch .info{flex:1;min-width:0}',
     '.tgpan-ch .name{font-size:14px;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}',
-    '.tgpan-ch .meta{font-size:12px;color:var(--color-on-surface-variant,#888);margin-top:3px;line-height:1.6}',
+    '.tgpan-ch .meta{font-size:12px;color:var(--color-on-surface-variant,#838a95);margin-top:3px;line-height:1.6}',
     '.tgpan-ch .err{font-size:12px;color:#b3261e;margin-top:3px;line-height:1.5}',
     '.tgpan-ch .ops{display:flex;gap:6px;flex:0 0 auto}',
 
-    '.tgpan-cred{display:flex;align-items:center;gap:12px;padding:13px 14px;border-radius:8px;',
-    'border:1px solid var(--color-outline-variant,#eaeaea);margin-bottom:9px;',
+    /* --- 凭据卡片 --- */
+    '.tgpan-cred{display:flex;align-items:center;gap:12px;padding:13px 15px;border-radius:10px;',
+    'border:1px solid var(--color-outline-variant,#e8ebef);margin-bottom:10px;',
     'background:var(--color-surface-container-low,#fafbfc)}',
     '.tgpan-cred .info{flex:1;min-width:0}',
     '.tgpan-cred .uname{font-size:14px;font-weight:600;font-family:ui-monospace,Menlo,Consolas,monospace}',
-    '.tgpan-cred .meta{font-size:12px;color:var(--color-on-surface-variant,#888);margin-top:3px}',
+    '.tgpan-cred .meta{font-size:12px;color:var(--color-on-surface-variant,#838a95);margin-top:3px}',
 
-    '.tgpan-pwbox{margin-top:14px;padding:14px;border-radius:8px;background:#fff8e6;',
-    'border:1.5px dashed #ffc107}',
-    '.tgpan-pwbox .t{font-size:13px;font-weight:600;color:#8a6100;margin-bottom:10px}',
+    /* --- 密码框 --- */
+    '.tgpan-pwbox{margin-top:14px;padding:15px;border-radius:10px;background:var(--tgpan-warn-bg,#fff8e6);',
+    'border:1.5px dashed var(--tgpan-warn-bd,#ffc107)}',
+    '.tgpan-pwbox .t{font-size:13px;font-weight:600;color:var(--tgpan-warn-fg,#8a6100);margin-bottom:10px}',
     '.tgpan-pwbox .v{display:flex;gap:8px;align-items:center;margin-bottom:8px}',
-    '.tgpan-pwbox .v code{flex:1;background:#fff;padding:9px 11px;border-radius:6px;',
+    '.tgpan-pwbox .v code{flex:1;background:var(--color-surface,#fff);padding:9px 11px;border-radius:7px;',
     'font-family:ui-monospace,Menlo,Consolas,monospace;font-size:13px;',
-    'border:1px solid #ffd75e;word-break:break-all;color:#333}',
-    '.tgpan-pwbox .n{font-size:12px;color:#8a6100;line-height:1.6}',
+    'border:1px solid var(--tgpan-warn-bd,#ffd75e);word-break:break-all;color:var(--color-on-surface,#333)}',
+    '.tgpan-pwbox .n{font-size:12px;color:var(--tgpan-warn-fg,#8a6100);line-height:1.6}',
 
-    '.tgpan-mount{margin-top:12px;border:1px solid var(--color-outline-variant,#eaeaea);border-radius:8px;overflow:hidden}',
-    '.tgpan-mount .r{display:flex;border-bottom:1px solid var(--color-outline-variant,#eaeaea)}',
+    /* --- 挂载信息表 --- */
+    '.tgpan-mount{margin-top:12px;border:1px solid var(--color-outline-variant,#e8ebef);border-radius:10px;overflow:hidden}',
+    '.tgpan-mount .r{display:flex;border-bottom:1px solid var(--color-outline-variant,#e8ebef)}',
     '.tgpan-mount .r:last-child{border-bottom:none}',
     '.tgpan-mount .k{flex:0 0 96px;padding:10px 13px;font-size:13px;font-weight:600;',
-    'background:var(--color-surface-container-low,#fafbfc);color:var(--color-on-surface-variant,#666)}',
-    '.tgpan-mount .v{flex:1;padding:10px 13px;font-size:13px;',
+    'background:var(--color-surface-container-low,#fafbfc);color:var(--color-on-surface-variant,#5c636e)}',
+    '.tgpan-mount .v{flex:1;padding:10px 13px;font-size:13px;min-width:0;',
     'font-family:ui-monospace,Menlo,Consolas,monospace;word-break:break-all;display:flex;align-items:center}',
 
-    '#tgpan-empty{text-align:center;padding:36px 16px;font-size:13.5px;',
-    'color:var(--color-on-surface-variant,#999);line-height:1.9}',
+    /* --- 空 / 加载状态：class 与 id 都支持（原先只写了 id，剧集页签用的是 class，样式全丢） --- */
+    '#tgpan-empty,.tgpan-empty{text-align:center;padding:40px 16px;font-size:14px;',
+    'color:var(--color-on-surface-variant,#969ba4);line-height:1.9}',
+    '.tgpan-empty .ico{display:block;font-size:30px;margin-bottom:10px;opacity:.55}',
+    '.tgpan-empty .cta{margin-top:14px}',
+    '.tgpan-skeleton{display:flex;flex-direction:column;gap:10px;padding:6px 0}',
+    '.tgpan-skel-row{height:58px;border-radius:10px;',
+    'background:linear-gradient(90deg,#f0f1f4 25%,#e6e8ec 37%,#f0f1f4 63%);',
+    'background-size:400% 100%;animation:tgpan-shimmer 1.3s ease-in-out infinite}',
+    '@keyframes tgpan-shimmer{0%{background-position:100% 50%}100%{background-position:0 50%}}',
 
-    /* 剧集卡片 */
+    /* --- 剧集卡片 --- */
     '.tgpan-series-grid{display:grid;gap:10px}',
-    '.tgpan-series-card{border:1px solid var(--color-outline-variant,#e6e8eb);',
-    'border-radius:11px;padding:13px 15px;background:var(--color-surface,#fff)}',
-    '.tgpan-series-name{font-size:14.5px;font-weight:650;margin-bottom:5px}',
-    '.tgpan-series-meta{font-size:12.5px;color:' + ACCENT + ';margin-bottom:9px}',
+    '.tgpan-series-card{border:1px solid var(--color-outline-variant,#e8ebef);',
+    'border-radius:11px;padding:14px 16px;background:var(--color-surface,#fff);',
+    'box-shadow:0 1px 2px rgba(16,24,40,.04)}',
+    '.tgpan-series-name{font-size:16px;font-weight:650;margin-bottom:5px;letter-spacing:-.1px}',
+    '.tgpan-series-meta{font-size:13px;color:' + ACCENT + ';margin-bottom:10px;font-weight:500}',
     '.tgpan-series-detail{display:flex;gap:8px;font-size:12px;margin-bottom:8px}',
-    '.tgpan-series-detail .k{flex:0 0 68px;color:var(--color-on-surface-variant,#888)}',
-    '.tgpan-series-detail .v{flex:1;word-break:break-all}',
+    '.tgpan-series-detail .k{flex:0 0 68px;color:var(--color-on-surface-variant,#838a95)}',
+    '.tgpan-series-detail .v{flex:1;word-break:break-all;min-width:0}',
     '.tgpan-series-samples{display:flex;flex-wrap:wrap;gap:5px;margin-bottom:10px}',
-    '.tgpan-chip{font-size:11.5px;padding:3px 8px;border-radius:5px;',
+    '.tgpan-chip{font-size:12px;padding:3px 8px;border-radius:6px;',
     'background:var(--color-surface-container-low,#f2f4f7);',
-    'color:var(--color-on-surface-variant,#555);',
+    'color:var(--color-on-surface-variant,#5c636e);',
     'font-family:ui-monospace,Menlo,Consolas,monospace}',
-    '.tgpan-series-ops{display:flex;gap:8px}',
+    '.tgpan-series-ops{display:flex;gap:8px;flex-wrap:wrap}',
 
+    /* --- 剧集文件列表（点选改名） --- */
+    '.tgpan-ep-list{margin-top:10px;border-top:1px solid var(--color-outline-variant,#eceef1);padding-top:10px;',
+    'max-height:280px;overflow-y:auto}',
+    '.tgpan-ep-row{display:flex;align-items:center;gap:9px;padding:7px 9px;border-radius:8px;',
+    'cursor:pointer;font-size:13px;transition:background .13s}',
+    '.tgpan-ep-row:hover{background:var(--color-surface-container-low,#f4f6f9)}',
+    '.tgpan-ep-row .ep{flex:0 0 42px;text-align:center;font-size:11px;font-weight:700;',
+    'color:' + ACCENT + ';background:var(--tgpan-ep-bg,#eaf2fd);border-radius:5px;padding:2px 0}',
+    '.tgpan-ep-row .nm{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}',
+    '.tgpan-ep-row .sz{flex:0 0 auto;font-size:11px;color:var(--color-on-surface-variant,#969ba4)}',
+    '.tgpan-ep-row .go{flex:0 0 auto;font-size:12px;color:' + ACCENT + ';font-weight:600}',
+
+    /* --- 轻量编辑表单 --- */
+    '.tgpan-edit{margin-top:12px;padding:14px;border-radius:10px;',
+    'background:var(--color-surface-container-low,#f7f8fa);',
+    'border:1px solid var(--color-outline-variant,#e4e7ec)}',
+    '.tgpan-edit .row{margin-bottom:11px}',
+    '.tgpan-edit label{display:block;font-size:13px;font-weight:600;margin-bottom:5px}',
+    '.tgpan-edit input{width:100%;box-sizing:border-box;padding:9px 12px;border-radius:8px;',
+    'border:1.5px solid var(--color-outline,#e2e5e9);font-size:13.5px;font-family:inherit;',
+    'background:var(--color-surface,#fff);color:var(--color-on-surface,#111);outline:none}',
+    '.tgpan-edit input:focus{border-color:' + ACCENT + ';box-shadow:0 0 0 3px rgba(43,125,233,.12)}',
+    '.tgpan-edit .ops{display:flex;gap:8px;margin-top:13px}',
+
+    /* --- 暗色模式：补齐 result / pwbox / help / 卡片 --- */
+    '.dark #tgpan-box,[data-theme="dark"] #tgpan-box{',
+    '--tgpan-ok-bg:#12291d;--tgpan-ok-fg:#68d391;--tgpan-ok-bd:#22543a;',
+    '--tgpan-er-bg:#2d1618;--tgpan-er-fg:#fc8181;--tgpan-er-bd:#5c2a2e;',
+    '--tgpan-ld-bg:#12202e;--tgpan-ld-fg:#63b3ed;--tgpan-ld-bd:#23405c;',
+    '--tgpan-warn-bg:#2b2413;--tgpan-warn-bd:#7a6420;--tgpan-warn-fg:#ecc94b;',
+    '--tgpan-ep-bg:#16283d}',
+    '.dark .tgpan-help,[data-theme="dark"] .tgpan-help{',
+    'background:var(--color-surface-container-low,#20242b) !important}',
+    '.dark .tgpan-help b,[data-theme="dark"] .tgpan-help b{',
+    'color:var(--color-on-surface,#e6e8eb) !important}',
+    '.dark .tgpan-help code,[data-theme="dark"] .tgpan-help code{',
+    'background:var(--color-surface-container-high,#2c313a) !important}',
+    '.dark .tgpan-skel-row,[data-theme="dark"] .tgpan-skel-row{',
+    'background:linear-gradient(90deg,#23272e 25%,#2b3038 37%,#23272e 63%);',
+    'background-size:400% 100%}',
+
+    /* --- 移动端 --- */
     '@media(max-width:600px){',
     '#tgpan-fab{right:14px;bottom:14px;padding:11px 16px;font-size:14px}',
-    '#tgpan-head,#tgpan-tabs{padding-left:16px;padding-right:16px}',
+    '#tgpan-head{padding:18px 16px 0}',
+    '#tgpan-tabs{padding:0 16px}',
     '#tgpan-body{padding:16px}',
-    '.tgpan-mount .k{flex:0 0 74px}',
+    '#tgpan-box{max-height:92vh;border-radius:12px}',
+    '.tgpan-mount .k{flex:0 0 74px;font-size:12px}',
+    '.tgpan-mount .v{font-size:12px}',
     '.tgpan-ch{flex-wrap:wrap}',
+    '.tgpan-ch .ops{width:100%;justify-content:flex-end}',
+    '#tgpan-actions{flex-direction:column-reverse}',
+    '.tgpan-series-detail .k{flex:0 0 56px}',
     '}'
   ].join('');
+
 
   /* ======================================================================
    *  工具函数
@@ -259,12 +358,12 @@
       '  <div id="tgpan-head">',
       '    <h3>🗂 TGPan 控制台</h3>',
       '    <div class="sub">把 Telegram 频道变成网盘，直接在线看、挂播放器。</div>',
-      '    <div id="tgpan-tabs">',
-      '      <button class="tgpan-tab active" data-tab="scan">📡 扫描频道</button>',
-      '      <button class="tgpan-tab" data-tab="auto">🔄 自动扫描</button>',
-      '      <button class="tgpan-tab" data-tab="webdav">🔗 WebDAV</button>',
-      '      <button class="tgpan-tab" data-tab="series">🎬 剧集</button>',
-      '      <button class="tgpan-tab" data-tab="help">💡 帮助</button>',
+      '    <div id="tgpan-tabs" role="tablist" aria-label="TGPan 功能页签">',
+      '      <button class="tgpan-tab active" role="tab" aria-selected="true" tabindex="0" data-tab="scan">📡 扫描频道</button>',
+      '      <button class="tgpan-tab" role="tab" aria-selected="false" tabindex="-1" data-tab="auto">🔄 自动扫描</button>',
+      '      <button class="tgpan-tab" role="tab" aria-selected="false" tabindex="-1" data-tab="webdav">🔗 WebDAV</button>',
+      '      <button class="tgpan-tab" role="tab" aria-selected="false" tabindex="-1" data-tab="series">🎬 剧集</button>',
+      '      <button class="tgpan-tab" role="tab" aria-selected="false" tabindex="-1" data-tab="help">💡 帮助</button>',
       '    </div>',
       '  </div>',
       '  <div id="tgpan-body">',
@@ -396,20 +495,40 @@
     });
 
     var tabs = mask.querySelectorAll('.tgpan-tab');
+    function activateTab(name) {
+      for (var j = 0; j < tabs.length; j++) {
+        var on = tabs[j].getAttribute('data-tab') === name;
+        tabs[j].classList.toggle('active', on);
+        tabs[j].setAttribute('aria-selected', on ? 'true' : 'false');
+        tabs[j].setAttribute('tabindex', on ? '0' : '-1');
+      }
+      var panes = mask.querySelectorAll('.tgpan-pane');
+      for (var k = 0; k < panes.length; k++) {
+        panes[k].classList.toggle('active', panes[k].getAttribute('data-pane') === name);
+      }
+      if (name === 'auto') loadChannels();
+      if (name === 'webdav') loadCredentials();
+      if (name === 'series') loadSeries();
+    }
+
     for (var i = 0; i < tabs.length; i++) {
       tabs[i].addEventListener('click', function () {
-        var name = this.getAttribute('data-tab');
-        for (var j = 0; j < tabs.length; j++) tabs[j].classList.remove('active');
-        this.classList.add('active');
-        var panes = mask.querySelectorAll('.tgpan-pane');
-        for (var k = 0; k < panes.length; k++) {
-          panes[k].classList.toggle('active', panes[k].getAttribute('data-pane') === name);
-        }
-        if (name === 'auto') loadChannels();
-        if (name === 'webdav') loadCredentials();
-        if (name === 'series') loadSeries();
+        activateTab(this.getAttribute('data-tab'));
+      });
+      // 键盘左右键在页签间移动（可访问性）
+      tabs[i].addEventListener('keydown', function (e) {
+        if (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight') return;
+        var idx = Array.prototype.indexOf.call(tabs, this);
+        var next = e.key === 'ArrowRight' ? idx + 1 : idx - 1;
+        if (next < 0) next = tabs.length - 1;
+        if (next >= tabs.length) next = 0;
+        tabs[next].focus();
+        activateTab(tabs[next].getAttribute('data-tab'));
+        e.preventDefault();
       });
     }
+    // 供空状态里的 CTA 按钮跨页签跳转
+    window.__tgpanSwitchTab = activateTab;
 
     $('#tgpan-close', mask).onclick = closeModal;
     $('#tgpan-start', mask).onclick = doScan;
@@ -443,11 +562,21 @@
       setResult(res, 'err', '⚠️ 请先填入频道 ID');
       return;
     }
-    var channelId = parseInt(chanRaw.replace(/[^0-9-]/g, ''), 10);
-    if (!channelId || isNaN(channelId)) {
-      setResult(res, 'err', '⚠️ 频道 ID 格式不对，应该是纯数字（可带负号）');
+    // 频道 ID 只保留数字，负号单独判断。
+    // 之前用 replace(/[^0-9-]/g,'') 会把负号留在任意位置，
+    // 「1-00」这种会被拼成「-100」，属于误放行。
+    var negative = chanRaw.charAt(0) === '-';
+    var digits = chanRaw.replace(/[^0-9]/g, '');
+    if (!digits) {
+      setResult(res, 'err', '⚠️ 频道 ID 格式不对，应该是数字（可用 -100 开头）');
       return;
     }
+    var channelId = parseInt(digits, 10);
+    if (!channelId || isNaN(channelId)) {
+      setResult(res, 'err', '⚠️ 频道 ID 格式不对，应该是数字（可用 -100 开头）');
+      return;
+    }
+    if (negative) channelId = -channelId;
 
     btn.disabled = true;
     btn.textContent = '扫描中…';
@@ -497,17 +626,23 @@
   /* ======================================================================
    *  功能二：自动扫描管理
    * ==================================================================== */
+  // 请求序号：防止快速切页签时旧响应覆盖新结果
+  var channelsSeq = 0;
+
   function loadChannels(force) {
     var list = document.getElementById('tgpan-ch-list');
     if (!list) return;
     if (!force && list.getAttribute('data-loaded') === '1') return;
 
-    list.innerHTML = '<div id="tgpan-empty">正在加载…</div>';
+    var seq = ++channelsSeq;
+    list.innerHTML = skeleton(2);
 
     api('GET', '/scan/channels').then(function (r) {
+      if (seq !== channelsSeq) return;
       if (!r.ok) {
-        list.innerHTML = '<div id="tgpan-empty">加载失败：' +
-          esc((r.data && r.data.message) || ('HTTP ' + r.status)) + '</div>';
+        list.innerHTML = emptyState('⚠️', '加载失败：' +
+          esc((r.data && r.data.message) || ('HTTP ' + r.status)));
+        bindGoto(list);
         return;
       }
       var d = r.data || {};
@@ -515,9 +650,10 @@
       list.setAttribute('data-loaded', '1');
 
       if (!chs.length) {
-        list.innerHTML = '<div id="tgpan-empty">' +
-          '还没有登记任何频道。<br>去「📡 扫描频道」页签扫一个，' +
-          '并勾选「加入自动扫描」。</div>';
+        list.innerHTML = emptyState('📡',
+          '还没有登记任何频道。<br>去「扫描频道」页签扫一个，并勾选「加入自动扫描」。',
+          '去扫描频道', 'scan');
+        bindGoto(list);
         return;
       }
 
@@ -529,7 +665,8 @@
           ' · 上次 ' + fmtTime(c.lastScanAt);
         if (c.folderName) meta += ' · 文件夹「' + c.folderName + '」';
         html.push(
-          '<div class="tgpan-ch" data-cid="' + c.channelId + '">' +
+          '<div class="tgpan-ch" data-cid="' + esc(String(c.channelId)) + '"' +
+          ' data-enabled="' + (c.enabled ? '1' : '0') + '">' +
           '<div class="info">' +
           '<div class="name">' + esc(c.channelName || ('频道 ' + c.channelId)) + '</div>' +
           '<div class="meta">' + esc(meta) + '</div>' +
@@ -551,7 +688,10 @@
         btns[i].addEventListener('click', onChannelAction);
       }
     }).catch(function (e) {
-      list.innerHTML = '<div id="tgpan-empty">请求出错：' + esc(String(e)) + '</div>';
+      if (seq !== channelsSeq) return;
+      list.innerHTML = emptyState('⚠️', '请求出错：' +
+        esc(String((e && e.message) || e)));
+      bindGoto(list);
     });
   }
 
@@ -589,7 +729,9 @@
     }
 
     if (act === 'toggle') {
-      var nowEnabled = btn.textContent.trim() === '暂停';
+      // 用 data-enabled 属性判断当前状态，而不是读按钮文字。
+      // 按钮文字随时可能被改（比如点了变成「切换中…」），靠文字判断会错乱。
+      var nowEnabled = card.getAttribute('data-enabled') === '1';
       btn.disabled = true;
       api('POST', '/scan/channels', {
         channelId: parseInt(cid, 10),
@@ -635,6 +777,37 @@
    * ==================================================================== */
 
   var seriesCache = null;
+  // 请求序号：快速切换页签时，旧响应不能覆盖新结果
+  var seriesSeq = 0;
+
+  // 骨架屏，替代纯文字「正在读取…」
+  function skeleton(rows) {
+    var out = ['<div class="tgpan-skeleton">'];
+    for (var i = 0; i < (rows || 3); i++) out.push('<div class="tgpan-skel-row"></div>');
+    out.push('</div>');
+    return out.join('');
+  }
+
+  // 带图标和引导按钮的空状态
+  function emptyState(icon, text, ctaText, ctaTab) {
+    var s = '<div class="tgpan-empty"><span class="ico">' + icon + '</span>' + text;
+    if (ctaText) {
+      s += '<div class="cta"><button class="tgpan-btn primary sm" data-goto="' +
+        esc(ctaTab) + '">' + esc(ctaText) + '</button></div>';
+    }
+    return s + '</div>';
+  }
+
+  // 绑定空状态里的「跳到某页签」按钮
+  function bindGoto(root) {
+    var gs = root.querySelectorAll('[data-goto]');
+    for (var i = 0; i < gs.length; i++) {
+      gs[i].onclick = function () {
+        var tab = this.getAttribute('data-goto');
+        if (typeof window.__tgpanSwitchTab === 'function') window.__tgpanSwitchTab(tab);
+      };
+    }
+  }
 
   function loadSeries(force) {
     var list = document.getElementById('tgpan-series-list');
@@ -642,18 +815,24 @@
     if (!list) return;
 
     if (seriesCache && !force) { renderSeries(seriesCache); return; }
-    list.innerHTML = '<div class="tgpan-empty">⏳ 正在读取…</div>';
+    var seq = ++seriesSeq;
+    list.innerHTML = skeleton(3);
     setResult(res, '', '');
 
     api('GET', '/scan/series').then(function (r) {
+      if (seq !== seriesSeq) return; // 已有更新的请求发出，丢弃本次结果
       if (!r.ok) {
-        list.innerHTML = '<div class="tgpan-empty">加载失败：' + esc(r.data && r.data.message || r.status) + '</div>';
+        list.innerHTML = emptyState('⚠️', '加载失败：' +
+          esc((r.data && r.data.message) || ('HTTP ' + r.status)));
+        bindGoto(list);
         return;
       }
       seriesCache = r.data;
       renderSeries(r.data);
     }).catch(function (e) {
-      list.innerHTML = '<div class="tgpan-empty">加载失败：' + esc(e.message) + '</div>';
+      if (seq !== seriesSeq) return;
+      list.innerHTML = emptyState('⚠️', '加载失败：' + esc(String((e && e.message) || e)));
+      bindGoto(list);
     });
   }
 
@@ -662,14 +841,17 @@
     if (!list) return;
     var arr = (data && data.series) || [];
     if (!arr.length) {
-      list.innerHTML = '<div class="tgpan-empty">还没有识别出剧集。<br>' +
-        '去「📡 扫描频道」扫一个电视剧频道试试 —— 文件名里带「第01集」' +
-        '「S01E05」的会被自动归到剧名文件夹里。</div>';
+      list.innerHTML = emptyState('🎬',
+        '还没有识别出剧集。<br>扫描一个电视剧频道试试 —— ' +
+        '文件名里带「第01集」「S01E05」的会自动归到剧名文件夹里。',
+        '去扫描频道', 'scan');
+      bindGoto(list);
       return;
     }
 
-    var out = ['<div style="font-size:13px;color:#666;margin-bottom:10px">' +
-      '共 <b>' + arr.length + '</b> 部剧。点「改名 / 移动」可以手动纠正识别错的。</div>'];
+    var out = ['<div style="font-size:13px;color:var(--color-on-surface-variant,#6b7280);' +
+      'margin-bottom:12px">共 <b>' + arr.length + '</b> 部剧。' +
+      '展开后点任意一集即可改名或移动。</div>'];
     out.push('<div class="tgpan-series-grid">');
     for (var i = 0; i < arr.length; i++) {
       var s = arr[i];
@@ -684,94 +866,176 @@
         '<div class="tgpan-series-card" data-sid="' + esc(s.id) + '">',
         '  <div class="tgpan-series-name">🎬 ' + esc(s.title) + '</div>',
         '  <div class="tgpan-series-meta">' + esc(range || (s.fileCount + ' 个文件')) + '</div>',
-        '  <div class="tgpan-series-detail">',
-        '    <div class="k">文件夹 ID</div><div class="v"><code>' + esc(s.id) + '</code></div>',
-        '  </div>',
         '  <div class="tgpan-series-samples">' + (s.samples || []).map(function (n) {
           return '<span class="tgpan-chip">' + esc(n) + '</span>';
         }).join('') + '</div>',
         '  <div class="tgpan-series-ops">',
-        '    <button class="tgpan-btn ghost sm" data-op="rename">✏️ 改名 / 移动文件</button>',
+        '    <button class="tgpan-btn ghost sm" data-op="expand">📂 展开文件（' +
+        (s.files ? s.files.length : 0) + '）</button>',
         '  </div>',
+        '  <div class="tgpan-ep-list" hidden></div>',
         '</div>');
     }
     out.push('</div>');
     list.innerHTML = out.join('\n');
 
-    // 绑定按钮
-    var btns = list.querySelectorAll('[data-op="rename"]');
-    for (var k = 0; k < btns.length; k++) {
-      btns[k].onclick = function () {
-        var card = this.closest('.tgpan-series-card');
-        var sid = card.getAttribute('data-sid');
-        var found = null;
-        for (var m = 0; m < arr.length; m++) if (arr[m].id === sid) found = arr[m];
-        if (found) promptRename(found);
+    var cards = list.querySelectorAll('.tgpan-series-card');
+    for (var k = 0; k < cards.length; k++) {
+      var card = cards[k];
+      var sid = card.getAttribute('data-sid');
+      var found = null;
+      for (var m = 0; m < arr.length; m++) if (arr[m].id === sid) found = arr[m];
+      if (!found) continue;
+      bindSeriesCard(card, found);
+    }
+  }
+
+  // bindSeriesCard 绑定单个剧集卡片的展开 / 点选逻辑
+  function bindSeriesCard(card, series) {
+    var btn = card.querySelector('[data-op="expand"]');
+    var pane = card.querySelector('.tgpan-ep-list');
+    if (!btn || !pane) return;
+
+    btn.onclick = function () {
+      if (!pane.hasAttribute('hidden')) {
+        pane.setAttribute('hidden', '');
+        btn.innerHTML = '📂 展开文件（' + (series.files ? series.files.length : 0) + '）';
+        return;
+      }
+      renderEpisodeList(pane, series);
+      pane.removeAttribute('hidden');
+      btn.innerHTML = '📁 收起文件';
+    };
+  }
+
+  // renderEpisodeList 渲染某一部剧的文件清单，每行可点击去改名
+  function renderEpisodeList(pane, series) {
+    var files = series.files || [];
+    if (!files.length) {
+      pane.innerHTML = '<div style="font-size:12.5px;color:#9096a0;padding:8px 4px">' +
+        '这部剧下还没有可展示的文件。</div>';
+      return;
+    }
+
+    var out = [];
+    for (var i = 0; i < files.length; i++) {
+      var f = files[i];
+      out.push(
+        '<div class="tgpan-ep-row" data-fid="' + esc(f.id) + '" data-fname="' + esc(f.name) + '">',
+        '  <span class="ep">' + (f.episode > 0 ? ('E' + f.episode) : '—') + '</span>',
+        '  <span class="nm" title="' + esc(f.name) + '">' + esc(f.name) + '</span>',
+        '  <span class="sz">' + humanSize(f.size) + '</span>',
+        '  <span class="go">改名</span>',
+        '</div>');
+    }
+    pane.innerHTML = out.join('\n');
+
+    // 点某一行 -> 在该卡片内展开轻量编辑表单（不再用 window.prompt 让用户手输 ID）
+    var rows = pane.querySelectorAll('.tgpan-ep-row');
+    for (var j = 0; j < rows.length; j++) {
+      rows[j].onclick = function () {
+        var fid = this.getAttribute('data-fid');
+        var fname = this.getAttribute('data-fname');
+        var file = null;
+        for (var t = 0; t < files.length; t++) if (files[t].id === fid) file = files[t];
+        if (file) openEpisodeEditor(pane, series, file, fname);
       };
     }
   }
 
-  // promptRename 让用户填「文件 ID / 新文件名」来纠正。
-  // 不用弹窗组件是有意为之 —— 这个入口是给遇到问题时用的，越简单越好，
-  // 能填完就走。
-  function promptRename(series) {
+  // openEpisodeEditor 在卡片内展开编辑表单：改名字 + 可选移动到别的文件夹
+  function openEpisodeEditor(pane, series, file, oldName) {
     var res = document.getElementById('tgpan-series-result');
-    var fileId = window.prompt(
-      '要调整哪个文件？\n\n' +
-      '（填文件 ID。可在网盘界面点开文件，从地址栏或详情里拿到；\n' +
-      '也可以用下面这个提示从数据库预置的示例 ID 试）\n\n' +
-      '当前剧集：' + series.title,
-      '');
-    if (!fileId) return;
 
-    var newName = window.prompt('新的文件名（留空表示只移动、不改名）\n\n规范格式：' +
-      series.title + ' S01E05.mp4', series.title + ' ');
-    if (newName === null) return;
+    // 默认把新名字预填成规范格式，用户只想改集号时不用全打一遍
+    var ext = '.mp4';
+    var dot = oldName.lastIndexOf('.');
+    if (dot > 0) ext = oldName.slice(dot);
+    var suggested = series.title + ' S01E' +
+      (file.episode > 0 ? String(file.episode).padStart(2, '0') : '01') + ext;
 
-    var parentId = window.prompt(
-      '移动到哪个文件夹？\n\n' +
-      '· 留空 = 不移动\n' +
-      '· 填 root = 移到根目录\n' +
-      '· 或填目标文件夹 ID', '');
-    if (parentId === null) return;
+    var box = document.createElement('div');
+    box.className = 'tgpan-edit';
+    box.innerHTML = [
+      '<div class="row"><label>新文件名</label>',
+      '<input type="text" class="ed-name" value="' + esc(suggested) + '"></div>',
+      '<div class="row"><label>移动到目录（选填）</label>',
+      '<input type="text" class="ed-parent" placeholder="留空=不动；填 root=移到根目录；或填目标文件夹 ID"></div>',
+      '<div style="font-size:12px;color:#9096a0;line-height:1.6">',
+      '当前文件：<code>' + esc(oldName) + '</code></div>',
+      '<div class="ops">',
+      '  <button class="tgpan-btn primary sm ed-save">保存</button>',
+      '  <button class="tgpan-btn ghost sm ed-cancel">取消</button>',
+      '</div>'
+    ].join('\n');
 
-    var body = { fileId: fileId };
-    if (newName.trim()) body.name = newName.trim();
-    if (parentId.trim()) body.parentId = parentId.trim();
+    // 同一时刻只保留一个编辑框
+    var old = pane.querySelector('.tgpan-edit');
+    if (old) old.remove();
 
-    if (!body.name && !body.parentId) {
-      setResult(res, 'err', '没填新名字也没填目标文件夹，什么都没做。');
-      return;
-    }
+    var row = pane.querySelector('.tgpan-ep-row[data-fid="' + cssEsc(file.id) + '"]');
+    if (row && row.parentNode) row.parentNode.insertBefore(box, row.nextSibling);
+    else pane.appendChild(box);
 
-    setResult(res, 'load', '⏳ 正在提交…');
-    api('POST', '/scan/series/rename', body).then(function (r) {
-      if (r.ok) {
-        setResult(res, 'ok', '✅ 已修改');
-        seriesCache = null;
-        loadSeries(true);
-      } else {
-        setResult(res, 'err', '❌ ' + (r.data && r.data.message || ('HTTP ' + r.status)));
+    var nameInput = box.querySelector('.ed-name');
+    if (nameInput) { nameInput.focus(); nameInput.select(); }
+
+    box.querySelector('.ed-cancel').onclick = function () { box.remove(); };
+    box.querySelector('.ed-save').onclick = function () {
+      var newName = (box.querySelector('.ed-name').value || '').trim();
+      var parentRaw = (box.querySelector('.ed-parent').value || '').trim();
+
+      var body = { fileId: file.id };
+      if (newName && newName !== oldName) body.name = newName;
+      if (parentRaw) {
+        body.parentId = (parentRaw === 'root' || parentRaw === '0') ? 'root' : parentRaw;
       }
-    }).catch(function (e) {
-      setResult(res, 'err', '❌ ' + e.message);
-    });
+      if (!body.name && !body.parentId) {
+        setResult(res, 'err', '没有改动，已取消。');
+        box.remove();
+        return;
+      }
+
+      setResult(res, 'load', '正在提交…');
+      api('POST', '/scan/series/rename', body).then(function (r) {
+        if (r.ok) {
+          setResult(res, 'ok', '✅ 已保存');
+          seriesCache = null;
+          loadSeries(true);
+        } else {
+          setResult(res, 'err', '❌ ' +
+            ((r.data && r.data.message) || ('HTTP ' + r.status)));
+        }
+      }).catch(function (e) {
+        setResult(res, 'err', '❌ ' + ((e && e.message) || e));
+      });
+    };
+  }
+
+  // cssEsc 转义属性选择器里要用的值
+  function cssEsc(s) {
+    return String(s).replace(/["\\]/g, '\\$&');
   }
 
   /* ======================================================================
    *  功能三：WebDAV 凭据管理
    * ==================================================================== */
+  var credentialsSeq = 0;
+
   function loadCredentials(force) {
     var list = document.getElementById('tgpan-cred-list');
     if (!list) return;
     if (!force && list.getAttribute('data-loaded') === '1') return;
 
-    list.innerHTML = '<div id="tgpan-empty">正在加载…</div>';
+    var seq = ++credentialsSeq;
+    list.innerHTML = skeleton(2);
 
     api('GET', '/webdav/credentials').then(function (r) {
+      if (seq !== credentialsSeq) return;
       if (!r.ok) {
-        list.innerHTML = '<div id="tgpan-empty">加载失败：' +
-          esc((r.data && r.data.message) || ('HTTP ' + r.status)) + '</div>';
+        list.innerHTML = emptyState('⚠️', '加载失败：' +
+          esc((r.data && r.data.message) || ('HTTP ' + r.status)));
+        bindGoto(list);
         return;
       }
       var d = r.data || {};
@@ -799,15 +1063,17 @@
       }
 
       if (!creds.length) {
-        list.innerHTML = '<div id="tgpan-empty">' +
-          '还没有生成过密码。<br>点上面的「生成 WebDAV 密码」按钮创建一个。</div>';
+        list.innerHTML = emptyState('🔗',
+          '还没有生成过密码。<br>点上面的「生成 WebDAV 密码」创建一个，' +
+          '填进播放器就能挂载。');
+        bindGoto(list);
         return;
       }
 
       var html = [];
       creds.forEach(function (c) {
         html.push(
-          '<div class="tgpan-cred" data-id="' + c.id + '">' +
+          '<div class="tgpan-cred" data-id="' + esc(String(c.id)) + '">' +
           '<div class="info">' +
           '<div class="uname">' + esc(c.username) + '</div>' +
           '<div class="meta">' +
@@ -846,7 +1112,9 @@
         });
       }
     }).catch(function (e) {
-      list.innerHTML = '<div id="tgpan-empty">请求出错：' + esc(String(e)) + '</div>';
+      if (seq !== credentialsSeq) return;
+      list.innerHTML = emptyState('⚠️', '请求出错：' + esc(String((e && e.message) || e)));
+      bindGoto(list);
     });
   }
 

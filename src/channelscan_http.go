@@ -102,9 +102,9 @@ func (e *extendedService) ChannelsScanListHTTP(w http.ResponseWriter, r *http.Re
 	}
 
 	writeJSON(w, http.StatusOK, map[string]any{
-		"channels":         out,
-		"defaultInterval":  defInterval,
-		"webdavMountPath":  webdavPrefix,
+		"channels":        out,
+		"defaultInterval": defInterval,
+		"webdavMountPath": webdavPrefix,
 	})
 }
 

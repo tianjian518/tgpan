@@ -69,7 +69,7 @@ type ScanResult struct {
 	// HighWater 本次扫到的最大消息 ID，作为下次增量扫描的游标
 	HighWater int `json:"highWater"`
 	// AutoScan 是否已登记自动扫描
-	AutoScan bool   `json:"autoScan"`
+	AutoScan bool `json:"autoScan"`
 	// EpisodeMatched 其中被识别为剧集、并归入剧名子文件夹的文件数
 	EpisodeMatched int `json:"episodeMatched"`
 	// SeriesFolders 本次用到的剧名子文件夹数量
@@ -264,14 +264,12 @@ func (a *apiService) FilesScanChannel(ctx context.Context, req ScanRequest) (*Sc
 				break
 			}
 
-			batch := 0
 			reachedCursor := false
 			for _, m := range msgs.Messages {
 				msg, ok := m.(*tg.Message)
 				if !ok {
 					continue
 				}
-				batch++
 				scanned++
 
 				// 增量模式：碰到已扫过的消息就停，后面的都处理过了
@@ -350,7 +348,11 @@ func (a *apiService) FilesScanChannel(ctx context.Context, req ScanRequest) (*Sc
 				epTags = append(epTags, ep)
 			}
 
-			if reachedCursor || batch < 100 {
+			// 用「本次实际拿到多少条」判断是否还有下一页，
+			// 而不是用「处理了多少条」。后者在有非消息条目（服务消息、
+			// 空消息）时会偏小，导致提前退出漏掉后面的视频。
+			pageLen := len(msgs.Messages)
+			if reachedCursor || pageLen < 100 {
 				break
 			}
 			// 避免触发限流
@@ -480,7 +482,10 @@ func (a *apiService) upsertChannelScan(userId, channelId int64, name, folderID s
 	now := time.Now().UTC()
 
 	var st models.ChannelScan
-	err := a.db.Where("channel_id = ?", channelId).First(&st).Error
+	// 注意必须带 user_id：channel_id 在业务上是「用户 × 频道」的复合键。
+	// 只看 channel_id 的话，B 用户扫同一个频道会命中 A 的记录并覆盖掉，
+	// 把 A 的游标和文件夹绑定串掉。
+	err := a.db.Where("channel_id = ? AND user_id = ?", channelId, userId).First(&st).Error
 
 	if err == gorm.ErrRecordNotFound {
 		// 首次登记
@@ -528,16 +533,18 @@ func (a *apiService) upsertChannelScan(userId, channelId int64, name, folderID s
 	if imported > 0 {
 		updates["total_imported"] = st.TotalImported + int64(imported)
 	}
-	return a.db.Model(&models.ChannelScan{}).Where("channel_id = ?", channelId).
+	return a.db.Model(&models.ChannelScan{}).
+		Where("channel_id = ? AND user_id = ?", channelId, userId).
 		Updates(updates).Error
 }
 
 // cleanMediaName 清洗视频文件名，提升播放器（网易爆米花/Infuse）的刮削命中率。
 //
 // 为什么需要：
-//   TG 频道里的视频名通常是「【高清】某某电影[1080P]某某压制组.mp4」这种，
-//   播放器按此去 TMDB 搜海报必然搜不到。这里把常见的装饰性标记剥掉，
-//   尽量还原成「某某电影 (2023).mp4」这种可识别的形式。
+//
+//	TG 频道里的视频名通常是「【高清】某某电影[1080P]某某压制组.mp4」这种，
+//	播放器按此去 TMDB 搜海报必然搜不到。这里把常见的装饰性标记剥掉，
+//	尽量还原成「某某电影 (2023).mp4」这种可识别的形式。
 //
 // 处理规则（保守，不确定的不动）：
 //  1. 去掉常见的中文方括号标记：【】［］ 内的推广/画质/来源字样

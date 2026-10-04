@@ -60,6 +60,13 @@ const (
 // davNS 是 WebDAV 的 XML 命名空间
 const davNS = "DAV:"
 
+// dummyBcryptHash 是一个固定的 bcrypt 哈希（明文是 "dummy"）。
+//
+// 用途：用户名不存在时，仍然跑一次 bcrypt 比对再返回 401，
+// 让「用户不存在」和「密码错误」两条路径耗时接近，
+// 防止通过响应时间差枚举出哪些用户名是有效的。
+const dummyBcryptHash = "$2a$10$N9qo8uLOickgx2ZMRZoMyeIjZAgcfl7p92ldGxad68LJZdL17lhWy"
+
 // ---------------------------------------------------------------------------
 // XML 结构体：WebDAV 的响应体是 XML，这里定义最小必要集合
 // ---------------------------------------------------------------------------
@@ -73,7 +80,7 @@ type multistatus struct {
 }
 
 type davResponse struct {
-	Href     string      `xml:"D:href"`
+	Href     string        `xml:"D:href"`
 	Propstat []davPropstat `xml:"D:propstat"`
 }
 
@@ -218,9 +225,14 @@ func (h *webdavHandler) authenticate(w http.ResponseWriter, r *http.Request) (mo
 		return user, cred, false
 	}
 
-	// 按用户名查凭据
+	// 按用户名查凭据。
+	//
+	// 注意：查不到用户时也要跑一次 bcrypt 比对（拿一个固定的假哈希），
+	// 否则「用户名不存在」会比「用户名存在但密码错」快得多（前者直接返回，
+	// 后者要跑一次 bcrypt）。这个耗时差异可以被用来枚举有效用户名。
 	if err := h.svc.api.db.Where("username = ? AND enabled = ?", username, true).
 		First(&cred).Error; err != nil {
+		_ = bcrypt.CompareHashAndPassword([]byte(dummyBcryptHash), []byte(password))
 		w.Header().Set("WWW-Authenticate", `Basic realm="TGPan WebDAV", charset="UTF-8"`)
 		http.Error(w, "invalid credentials", http.StatusUnauthorized)
 		return user, cred, false
@@ -753,8 +765,17 @@ func (e *extendedService) verifyCookieUser(r *http.Request) (*types.JWTClaims, e
 	return auth.VerifyUser(r.Context(), e.api.db, e.api.cache, e.api.cnf.JWT.Secret, cookie.Value)
 }
 
-// ensureUniqueUsername 保证用户名不重复
+// ensureUniqueUsername 保证用户名不重复。
+//
+// 用户名在整张表里是全局唯一的（认证时按 username 查一条），
+// 所以这里查重也不能限定 user_id —— 跨用户的同名一样会冲突。
+//
+// 注意这个函数只是「尽量」避免冲突：并发创建时两个请求可能同时
+// 查到「不冲突」，所以真正的兜底是表上的唯一索引，插入失败要能重试。
 func ensureUniqueUsername(db *gorm.DB, base string) string {
+	if base == "" {
+		base = "user"
+	}
 	name := base
 	for i := 1; i < 100; i++ {
 		var count int64
@@ -792,4 +813,3 @@ func decodeJSONBody(r *http.Request, v any) error {
 	}
 	return json.Unmarshal(body, v)
 }
-

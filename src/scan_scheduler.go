@@ -269,10 +269,3 @@ func (s *scanScheduler) recordFailure(st *models.ChannelScan, msg string) {
 func (s *scanScheduler) Stop() {
 	s.stopOnce.Do(func() { close(s.stopCh) })
 }
-
-func min(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
-}

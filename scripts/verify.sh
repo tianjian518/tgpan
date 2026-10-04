@@ -93,6 +93,59 @@ else
 fi
 
 echo
+echo "==> 5.1 v2.5.0 安全与前端修复自检"
+
+echo "    [H1] 越权读取 /api/files/stream（未登录期望 401，绝不能 200）→"
+code_stream=$(curl -s -o /dev/null -w "%{http_code}" "$BASE/api/files/stream/abcdef")
+echo "    HTTP $code_stream"
+if [ "$code_stream" = "200" ]; then
+  echo "    ❌ 未登录竟能读取文件流，越权漏洞未修复！"
+  exit 1
+fi
+
+echo "    [H2] alg=none 伪造 token（期望 401）→"
+code_none=$(curl -s -o /dev/null -w "%{http_code}" \
+  -H 'Cookie: access_token=eyJhbGciOiJub25lIiwidHlwIjoiSldUIn0.eyJ1c2VyX2lkIjo5OTl9.' \
+  "$BASE/api/files/stream/abcdef")
+echo "    HTTP $code_none"
+if [ "$code_none" = "200" ]; then
+  echo "    ❌ alg=none 伪造 token 竟然通过！"
+  exit 1
+fi
+
+echo "    [F2/F3] 前端皮肤修复是否生效 →"
+skin=$(curl -s "$BASE/tgpan-skin.js")
+f3_ok=1
+f2_ok=1
+# F3：不得再出现裸的全局输入框选择器
+if echo "$skin" | grep -qE "^\s*'input, textarea, select\{',"; then
+  echo "    ❌ F3 未修复：仍有全局 input/textarea/select 选择器（会污染原版界面）"
+  f3_ok=0
+fi
+# F2：不得再出现 #tgpan-help（该 id 不存在，是死代码）
+if echo "$skin" | grep -qE "^\s*'\.dark #tgpan-help"; then
+  echo "    ❌ F2 未修复：仍有失效的 #tgpan-help 选择器"
+  f2_ok=0
+fi
+if [ "$f3_ok" = "1" ] && echo "$skin" | grep -q '#tgpan-mask input'; then
+  echo "    ✅ F3 已修复（输入框样式已限定在 #tgpan-mask 内）"
+fi
+if [ "$f2_ok" = "1" ] && echo "$skin" | grep -q '\.tgpan-help'; then
+  echo "    ✅ F2 已修复（深色模式帮助块用 .tgpan-help）"
+fi
+
+echo "    [F1/F5/F6] 前端控制台修复是否生效 →"
+scan=$(curl -s "$BASE/tgpan-scan.js")
+for needle in "aria-selected" "activateTab" "openEpisodeEditor" "cssEsc" "emptyState"; do
+  if echo "$scan" | grep -q "$needle"; then
+    echo "    ✅ 含 $needle"
+  else
+    echo "    ❌ 缺少 $needle"
+    exit 1
+  fi
+done
+
+echo
 echo "==> 6. 剧集识别引擎自测（不依赖网络）"
 echo "    在容器内跑单元测试…"
 if docker exec "$CONTAINER" sh -c 'command -v go >/dev/null 2>&1' 2>/dev/null; then

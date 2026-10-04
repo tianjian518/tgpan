@@ -27,6 +27,14 @@ import (
 	"gorm.io/gorm"
 )
 
+// SeriesFileItem 剧集文件夹里的一个文件，供前端做「点选改名」
+type SeriesFileItem struct {
+	ID      string `json:"id"`
+	Name    string `json:"name"`
+	Episode int    `json:"episode"` // 识别出的集号，0 表示没识别出来
+	Size    int64  `json:"size"`
+}
+
 // SeriesFolderView 一个剧集文件夹的概览
 type SeriesFolderView struct {
 	ID       string `json:"id"`
@@ -39,6 +47,8 @@ type SeriesFolderView struct {
 	FirstEpisode int      `json:"firstEpisode"`
 	LastEpisode  int      `json:"lastEpisode"`
 	Samples      []string `json:"samples,omitempty"`
+	// Files 该剧的全部文件，前端用来让用户点选要改哪个（不用手输 ID）
+	Files []SeriesFileItem `json:"files,omitempty"`
 }
 
 // SeriesListHTTP 列出剧集文件夹
@@ -62,12 +72,32 @@ func (e *extendedService) SeriesListHTTP(w http.ResponseWriter, r *http.Request)
 	}
 
 	out := make([]SeriesFolderView, 0, len(folders))
+
+	// 一次把所有文件夹的文件捞出来，在内存里按 parent_id 分组。
+	//
+	// 原来的写法是「每个文件夹查一次文件」，频道 + 剧集文件夹一多就是
+	// 几十上百次往返（N+1）。这里改成一次 IN 查询，整体快一个量级。
+	folderIDs := make([]string, 0, len(folders))
 	for _, f := range folders {
-		var files []models.File
-		if err := e.api.db.Where("user_id = ? AND parent_id = ? AND type = ? AND status = ?",
-			userId, f.ID, "file", "active").Find(&files).Error; err != nil {
-			continue
+		folderIDs = append(folderIDs, f.ID)
+	}
+	filesByParent := map[string][]models.File{}
+	if len(folderIDs) > 0 {
+		var allFiles []models.File
+		if err := e.api.db.Where("user_id = ? AND parent_id IN ? AND type = ? AND status = ?",
+			userId, folderIDs, "file", "active").Find(&allFiles).Error; err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]any{"code": 500, "message": err.Error()})
+			return
 		}
+		for _, fl := range allFiles {
+			if fl.ParentId != nil {
+				filesByParent[*fl.ParentId] = append(filesByParent[*fl.ParentId], fl)
+			}
+		}
+	}
+
+	for _, f := range folders {
+		files := filesByParent[f.ID]
 		if len(files) == 0 {
 			continue
 		}
@@ -79,19 +109,26 @@ func (e *extendedService) SeriesListHTTP(w http.ResponseWriter, r *http.Request)
 
 		minEp, maxEp := 0, 0
 		names := make([]string, 0, len(files))
+		items := make([]SeriesFileItem, 0, len(files))
 		for _, file := range files {
 			names = append(names, file.Name)
+			var sz int64
+			if file.Size != nil {
+				sz = *file.Size
+			}
 			ep := ParseEpisode(file.Name)
-			if !ep.Ok || ep.Title != f.Name {
-				continue
+			item := SeriesFileItem{ID: file.ID, Name: file.Name, Size: sz}
+			if ep.Ok && ep.Title == f.Name {
+				item.Episode = ep.Episode
+				v.EpisodeCount++
+				if minEp == 0 || ep.Episode < minEp {
+					minEp = ep.Episode
+				}
+				if ep.Episode > maxEp {
+					maxEp = ep.Episode
+				}
 			}
-			v.EpisodeCount++
-			if minEp == 0 || ep.Episode < minEp {
-				minEp = ep.Episode
-			}
-			if ep.Episode > maxEp {
-				maxEp = ep.Episode
-			}
+			items = append(items, item)
 		}
 
 		// 没有一集能对上文件夹名，说明这不是剧集文件夹（可能是用户自己
@@ -106,6 +143,21 @@ func (e *extendedService) SeriesListHTTP(w http.ResponseWriter, r *http.Request)
 			names = names[:3]
 		}
 		v.Samples = names
+
+		// 文件按集号排序，前端展示时顺序才自然（第1集在最前）
+		sort.SliceStable(items, func(i, j int) bool {
+			a, b := items[i].Episode, items[j].Episode
+			if a == 0 || b == 0 {
+				return items[i].Name < items[j].Name
+			}
+			return a < b
+		})
+		// 单剧文件太多时截断，避免一次响应过大
+		if len(items) > 300 {
+			items = items[:300]
+		}
+		v.Files = items
+
 		out = append(out, v)
 	}
 
@@ -153,35 +205,14 @@ func (e *extendedService) SeriesRenameHTTP(w http.ResponseWriter, r *http.Reques
 
 	updates := map[string]any{"updated_at": time.Now().UTC()}
 
-	if n := strings.TrimSpace(req.Name); n != "" {
-		// 名字不能带路径分隔符，否则会在目录树里造出非法节点
-		n = sanitizeName(n)
-		if n == "" {
-			writeJSON(w, http.StatusBadRequest, map[string]any{"code": 400, "message": "文件名不能为空"})
-			return
-		}
-		// 同一目录下不能重名
-		var dup int64
-		q := e.api.db.Model(&models.File{}).
-			Where("user_id = ? AND name = ? AND status = ? AND id <> ?", userId, n, "active", file.ID)
-		if file.ParentId != nil && *file.ParentId != "" {
-			q = q.Where("parent_id = ?", *file.ParentId)
-		} else {
-			q = q.Where("parent_id IS NULL")
-		}
-		q.Count(&dup)
-		if dup > 0 {
-			writeJSON(w, http.StatusConflict, map[string]any{
-				"code": 409, "message": fmt.Sprintf("同目录下已有「%s」，换个名字", n)})
-			return
-		}
-		updates["name"] = n
-		// 改名后同步刷新分类，否则「.mkv」的文件还挂着旧分类
-		updates["category"] = string(category.GetCategory(n))
-	}
-
+	// 目标父目录：不移动就用文件当前所在目录。
+	// 重名检查必须针对「最终会落在哪个目录」，否则「改名 + 移动」同时做时，
+	// 目标目录里已有同名文件也照样能改进去，造成重名。
+	targetParent := file.ParentId
 	if req.ParentId != "" {
 		if req.ParentId == "root" {
+			// 移到根目录：父目录清空
+			targetParent = nil
 			updates["parent_id"] = nil
 		} else {
 			// 目标文件夹必须存在且属于本人，防止把文件挂到别人目录下
@@ -196,8 +227,37 @@ func (e *extendedService) SeriesRenameHTTP(w http.ResponseWriter, r *http.Reques
 				writeJSON(w, http.StatusBadRequest, map[string]any{"code": 400, "message": "不能移动到自身"})
 				return
 			}
+			pid := req.ParentId
+			targetParent = &pid
 			updates["parent_id"] = req.ParentId
 		}
+	}
+
+	if n := strings.TrimSpace(req.Name); n != "" {
+		// 名字不能带路径分隔符，否则会在目录树里造出非法节点
+		n = sanitizeName(n)
+		if n == "" {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"code": 400, "message": "文件名不能为空"})
+			return
+		}
+		// 同一目录下不能重名（按目标目录判断）
+		var dup int64
+		q := e.api.db.Model(&models.File{}).
+			Where("user_id = ? AND name = ? AND status = ? AND id <> ?", userId, n, "active", file.ID)
+		if targetParent != nil && *targetParent != "" {
+			q = q.Where("parent_id = ?", *targetParent)
+		} else {
+			q = q.Where("parent_id IS NULL")
+		}
+		q.Count(&dup)
+		if dup > 0 {
+			writeJSON(w, http.StatusConflict, map[string]any{
+				"code": 409, "message": fmt.Sprintf("同目录下已有「%s」，换个名字", n)})
+			return
+		}
+		updates["name"] = n
+		// 改名后同步刷新分类，否则「.mkv」的文件还挂着旧分类
+		updates["category"] = string(category.GetCategory(n))
 	}
 
 	if err := e.api.db.Model(&models.File{}).Where("id = ?", file.ID).
@@ -279,11 +339,4 @@ func (e *extendedService) SeriesMergeHTTP(w http.ResponseWriter, r *http.Request
 	}
 
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "moved": moved})
-}
-
-// normalizeSeasonFolderName 把「狂飙 第二季」这类文件夹名规整成「狂飙 S02」
-func normalizeSeriesTitle(t string) string {
-	t = strings.TrimSpace(t)
-	t = seasonOnlyPattern.ReplaceAllString(t, "")
-	return strings.TrimSpace(t)
 }

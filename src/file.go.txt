@@ -259,7 +259,7 @@ func (a *apiService) FilesCreate(ctx context.Context, fileIn *api.File) (*api.Fi
 					return nil, &apiError{err: errors.New("invalid part: part_id cannot be zero"), code: 400}
 				}
 			}
-			
+
 			// Convert uploads to parts
 			for _, upload := range uploads {
 				parts = append(parts, api.Part{
@@ -791,6 +791,38 @@ func (a *apiService) FilesUpdate(ctx context.Context, req *api.FileUpdate, param
 	return mapper.ToFileOut(file), nil
 }
 
+// streamCacheScope 决定流式接口的缓存维度。
+//
+// 为什么必须分维度：缓存是「按 key 全局共享」的，如果只用 fileId 当 key，
+// 那么 A 用户读过的文件会被缓存下来，B 用户拿同一个 fileId 来读时会直接
+// 命中缓存 —— 绕过下面 ownedFileQuery 里的归属校验。
+//
+//	userId != 0  ->  用 userId 做维度（网盘网页 / WebDAV / 分享链接）
+//	userId == 0  ->  用 hash 做维度（?hash= 直链，hash 本身就是通行证）
+func streamCacheScope(userId int64, shareHash string) string {
+	if userId != 0 {
+		return strconv.FormatInt(userId, 10)
+	}
+	return "hash:" + shareHash
+}
+
+// ownedFileQuery 构造「取文件」的查询条件，并强制归属校验。
+//
+// 安全要点：**只要请求带了用户身份（userId != 0），就必须校验
+// 这个文件属于该用户**。否则任何登录用户只要猜到/拿到别人的 fileId，
+// 就能通过 /api/files/stream/{fileId} 直接拉走别人的文件。
+//
+// 例外：userId == 0 表示「无身份」的分享直链，此时 fileId 不来自用户输入，
+// 而是由分享 hash 解析出来的，hash 校验即等价于授权。这种情况下若再加
+// user 过滤，分享播放会直接失效，所以不加。
+func ownedFileQuery(db *gorm.DB, fileId string, userId int64) *gorm.DB {
+	q := db.Model(&models.File{}).Where("id = ?", fileId)
+	if userId != 0 {
+		q = q.Where("user_id = ?", userId)
+	}
+	return q
+}
+
 func (e *extendedService) FilesStream(w http.ResponseWriter, r *http.Request, fileId string, userId int64) {
 	ctx := r.Context()
 	logger := logging.Component("FILE").With(
@@ -847,9 +879,21 @@ func (e *extendedService) FilesStream(w http.ResponseWriter, r *http.Request, fi
 		}
 	}
 
-	file, err := cache.Fetch(ctx, e.api.cache, cache.Key("files", fileId), 0, func() (*models.File, error) {
+	// 缓存键要带上「访问凭证」维度。
+	//
+	// 这里有两个来源：
+	//   1. 网盘网页 / WebDAV —— 已通过 cookie 或 Basic Auth 确定了 userId
+	//   2. 分享直链（?hash=）—— 没有用户身份，hash 本身就是通行证
+	//
+	// 如果只用 fileId 做缓存键，不同用户（甚至「有身份的」和「无身份的」）
+	// 会互相命中对方的缓存条目，等于绕过下面的归属校验。所以键里必须
+	// 带上 userId；直链分支则用 hash 本身当维度。
+	cacheScope := streamCacheScope(userId, r.URL.Query().Get("hash"))
+
+	file, err := cache.Fetch(ctx, e.api.cache, cache.Key("files", cacheScope, fileId), 0, func() (*models.File, error) {
 		var result models.File
-		if err := e.api.db.Model(&result).Where("id = ?", fileId).First(&result).Error; err != nil {
+		q := ownedFileQuery(e.api.db, fileId, userId)
+		if err := q.First(&result).Error; err != nil {
 			return nil, err
 		}
 		return &result, nil

@@ -113,8 +113,9 @@
     '}',
 
     /* ---- 四、文件列表：表格化（百度网盘的核心观感） ---- */
-    /* 表头吸顶 + 灰底 */
-    'thead, [role="rowgroup"]:first-child [role="row"],',
+    /* 表头吸顶 + 灰底。
+       F3 修复：作用域限定到「被打过标记的列表行」的容器，避免污染原版其它表格。 */
+    '[data-tgpan-list] thead, [data-tgpan-list] [role="row"]:first-child,',
     'div[data-tgpan-thead]{',
     '  position:sticky; top:0; z-index:5;',
     '  background:var(--color-surface-container-low);',
@@ -123,13 +124,12 @@
     '}',
 
     /* 行悬浮高亮 —— 百度网盘最明显的手感 */
-    '[role="row"]:hover, tr:hover,',
-    'div[data-tgpan-row]:hover{',
+    '[data-tgpan-row]:hover{',
     '  background:var(--color-primary-container) !important;',
     '  transition:background .12s ease;',
     '}',
     /* 表格行分隔线，更像传统网盘 */
-    '[role="row"], tr{',
+    '[data-tgpan-row]{',
     '  border-bottom:1px solid var(--color-outline-variant);',
     '}',
 
@@ -139,8 +139,11 @@
     '  font-weight:500 !important;',
     '}',
 
-    /* ---- 六、输入框：更方正 ---- */
-    'input, textarea, select{',
+    /* ---- 六、输入框：更方正 ----
+       F3 修复：原写法 `input, textarea, select{...}` 是全局选择器，
+       会把原版 Teldrive 界面里所有输入框的圆角一起改掉。这里限定到
+       TGPan 自建弹窗（#tgpan-mask）内部，只影响我们自己的控件。 */
+    '#tgpan-mask input, #tgpan-mask textarea, #tgpan-mask select{',
     '  border-radius:6px !important;',
     '}',
 
@@ -159,10 +162,10 @@
     '#tgpan-fab{',
     '  background:var(--color-primary) !important;',
     '  border-radius:8px !important;',
-    '  box-shadow:0 4px 14px rgba(43,125,233,.35) !important;',
+    '  box-shadow:0 4px 14px color-mix(in srgb, var(--color-primary) 35%, transparent) !important;',
     '}',
     '#tgpan-fab:hover{',
-    '  box-shadow:0 8px 22px rgba(43,125,233,.45) !important;',
+    '  box-shadow:0 8px 22px color-mix(in srgb, var(--color-primary) 45%, transparent) !important;',
     '}',
     '.tgpan-btn.primary{background:var(--color-primary) !important;border-radius:6px !important}',
     '.tgpan-btn.ghost{background:var(--color-surface-container-high) !important;',
@@ -180,12 +183,14 @@
     '  color:var(--color-on-surface) !important;',
     '  border-color:var(--color-outline) !important;',
     '}',
-    '.dark #tgpan-help, [data-theme="dark"] #tgpan-help{',
+    /* F2 修复：帮助块用的是 class `.tgpan-help`，原写法 `#tgpan-help` 永远匹配不到，
+       是死代码。这里改回 class 选择器，深色模式下帮助块才有正确配色。 */
+    '.dark .tgpan-help, [data-theme="dark"] .tgpan-help{',
     '  background:var(--color-surface-container) !important;',
     '  color:var(--color-on-surface-variant) !important;',
     '}',
-    '.dark #tgpan-help b, [data-theme="dark"] #tgpan-help b{color:var(--color-on-surface) !important}',
-    '.dark #tgpan-help code, [data-theme="dark"] #tgpan-help code{',
+    '.dark .tgpan-help b, [data-theme="dark"] .tgpan-help b{color:var(--color-on-surface) !important}',
+    '.dark .tgpan-help code, [data-theme="dark"] .tgpan-help code{',
     '  background:var(--color-surface-container-highest) !important;',
     '  color:var(--color-on-surface) !important;',
     '}',
@@ -206,12 +211,28 @@
    *
    *  原版用 role="row" 的表格结构，这里加个属性便于选择器定位，
    *  同时不影响原有逻辑。
+   *
+   *  F3 修复：给每一行的「容器」也打上 data-tgpan-list，
+   *  这样所有表格化样式都被限定在文件列表内，不会污染原版其它表格。
    * ---------------------------------------------------------------------- */
   function tagRows() {
     var rows = document.querySelectorAll('[role="row"], tr');
     for (var i = 0; i < rows.length; i++) {
-      if (!rows[i].hasAttribute('data-tgpan-row')) {
-        rows[i].setAttribute('data-tgpan-row', '1');
+      var r = rows[i];
+      if (!r.hasAttribute('data-tgpan-row')) {
+        r.setAttribute('data-tgpan-row', '1');
+      }
+      // 向上找到最近的表格容器并打标记（body 作为兜底不算）
+      var p = r.parentElement;
+      while (p && p !== document.body) {
+        if (p.tagName === 'TABLE' || p.tagName === 'TBODY' ||
+            p.tagName === 'THEAD' || p.hasAttribute('role')) {
+          if (!p.hasAttribute('data-tgpan-list')) {
+            p.setAttribute('data-tgpan-list', '1');
+          }
+          break;
+        }
+        p = p.parentElement;
       }
     }
   }
