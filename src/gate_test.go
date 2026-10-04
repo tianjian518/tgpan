@@ -45,12 +45,19 @@ func TestGateStateMachine(t *testing.T) {
 		t.Fatalf("fresh state = %q, want %q", st.State, gateStateInit)
 	}
 
-	// 2) 设了密码、没凭证 → need_pair
+	// 2) 设了密码、对外域名、无凭证 → need_login（必须先输管理密码）
 	if err := g.SetPassword("", "test1234"); err != nil {
 		t.Fatalf("SetPassword: %v", err)
 	}
-	if st := g.Status(r); st.State != gateStateNeedPair {
-		t.Fatalf("after password state = %q, want %q", st.State, gateStateNeedPair)
+	if st := g.Status(r); st.State != gateStateNeedLogin {
+		t.Fatalf("after password state = %q, want %q", st.State, gateStateNeedLogin)
+	}
+
+	// 2b) 同一个「设了密码但没配对」的状态，换成内网 Host → 免密进配对页
+	rLAN0 := httptest.NewRequest("GET", "http://10.0.0.119:30141/", nil)
+	rLAN0.Host = "10.0.0.119:30141"
+	if st := g.Status(rLAN0); st.State != gateStateNeedPair {
+		t.Fatalf("LAN unpaired state = %q, want %q", st.State, gateStateNeedPair)
 	}
 
 	// 3) 配对 TG 后，对外域名 → need_login
@@ -66,6 +73,42 @@ func TestGateStateMachine(t *testing.T) {
 	rLAN.Host = "10.0.0.119:30141"
 	if st := g.Status(rLAN); st.State != gateStateOK || !st.Bypass {
 		t.Fatalf("LAN state = %q bypass=%v, want ok/true", st.State, st.Bypass)
+	}
+}
+
+// TestGateLoggedInButNotPaired 是回归测试：
+// 用户已经输对了管理密码、但还没配对 TG 时，必须放行进配对页，
+// 不能被「!Paired」分支提前拦回 need_login（否则密码登录永远卡死）。
+func TestGateLoggedInButNotPaired(t *testing.T) {
+	g := newTestGate(t, []string{"pan.2016.de5.net"})
+	if err := g.SetPassword("", "test1234"); err != nil {
+		t.Fatalf("SetPassword: %v", err)
+	}
+
+	// 模拟「已通过密码登录」的浏览器：带上签名有效的通行证 Cookie
+	tok := g.sign(time.Now().Add(time.Hour).Unix())
+	r := httptest.NewRequest("GET", "http://pan.2016.de5.net/", nil)
+	r.Host = "pan.2016.de5.net"
+	r.AddCookie(&http.Cookie{Name: gateCookieName, Value: tok})
+
+	st := g.Status(r)
+	if st.State != gateStateNeedPair {
+		t.Fatalf("logged-in but unpaired state = %q, want %q", st.State, gateStateNeedPair)
+	}
+
+	// 配对之后同一个 Cookie 必须变成 ok（不再是 need_login）
+	if err := g.StoreMaster("FAKESESSION123", 42, "hash42", "alice", "Alice"); err != nil {
+		t.Fatalf("StoreMaster: %v", err)
+	}
+	if st := g.Status(r); st.State != gateStateOK {
+		t.Fatalf("logged-in paired state = %q, want %q", st.State, gateStateOK)
+	}
+
+	// 同样已登录，但换个不带 Cookie 的请求 → 仍要密码
+	r2 := httptest.NewRequest("GET", "http://pan.2016.de5.net/", nil)
+	r2.Host = "pan.2016.de5.net"
+	if st := g.Status(r2); st.State != gateStateNeedLogin {
+		t.Fatalf("no-cookie state = %q, want %q", st.State, gateStateNeedLogin)
 	}
 }
 

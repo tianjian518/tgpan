@@ -40,6 +40,20 @@ func gateExemptPath(p string) bool {
 	return false
 }
 
+// gatePairPath 判断是否是「配对 TG」所需的认证接口。
+// 这些接口只在闸门已放行（need_pair / ok）时才豁免，
+// 不能无条件放行——否则外网未登录的人也能直接调登录接口绕过闸门。
+func gatePairPath(p string) bool {
+	switch p {
+	case "/api/auth/ws", "/auth/ws",
+		"/api/auth/session", "/auth/session",
+		"/api/auth/login", "/auth/login",
+		"/api/auth/logout", "/auth/logout":
+		return true
+	}
+	return false
+}
+
 // gateExemptRequest 判断整个请求是否豁免闸门拦截。
 //
 // 除路径豁免外，还要放行 WebDAV 的能力探测：

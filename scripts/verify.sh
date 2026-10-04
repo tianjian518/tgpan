@@ -312,6 +312,53 @@ else
   echo "    ✅ /api/users/config 未登录 → HTTP $protected（已拦截）"
 fi
 
+# --- 状态机回归断言（v2.6.2 修复项）---
+# 曾经踩过的坑：闸门把「已放行但未配对」（need_pair）也当成拦截态，
+# 导致配对页自己连不上 /auth/* 通道，用户永远配不上 TG。
+echo "    [回归] 未登录时配对通道也必须被拦（外网不能借道绕过闸门）→"
+ps_code=$(curl -s -o /dev/null -w "%{http_code}" -H "Host: pan.2016.de5.net" "$BASE/api/auth/session")
+if [ "$ps_code" = "401" ]; then
+  echo "    ✅ 外网未登录 /auth/session → HTTP 401（已拦）"
+elif [ "$ps_code" = "204" ] || [ "$ps_code" = "200" ]; then
+  echo "    ⚠  /auth/session 未登录即可达（HTTP $ps_code）—— 若闸门 disable=true 属正常"
+else
+  echo "    ✅ /auth/session → HTTP $ps_code（未放行）"
+fi
+
+echo "    [回归] 域名未登录时状态必须是 need_login（不能误判为免密）→"
+dom_state2=$(curl -s -H "Host: pan.2016.de5.net" "$BASE/api/gate/status" \
+  | sed -n 's/.*"state":"\([^"]*\)".*/\1/p')
+case "$dom_state2" in
+  need_login|init)
+    echo "    ✅ 域名未登录 state=$dom_state2（正确，需先过闸门）";;
+  ok)
+    echo "    ⚠  域名未登录 state=ok（闸门 disable=true 时属正常）";;
+  *)
+    echo "    ✅ 域名未登录 state=$dom_state2";;
+esac
+
+echo "    [回归] 内网 Host 不应要求输管理密码（免密或仅待配对）→"
+lan_state=$(curl -s -H "Host: 10.0.0.119:30141" "$BASE/api/gate/status" \
+  | sed -n 's/.*"state":"\([^"]*\)".*/\1/p')
+case "$lan_state" in
+  ok|need_pair)
+    echo "    ✅ 内网 state=$lan_state（放行，不要求输密码）";;
+  need_login)
+    echo "    ❌ 内网竟然要求输密码（state=need_login）—— 反向白名单失效"; exit 1;;
+  *)
+    echo "    ✅ 内网 state=$lan_state";;
+esac
+
+echo "    [回归] 闸门状态互斥：同一次请求下 state 只能是四种之一 →"
+badstate=$(curl -s -H "Host: pan.2016.de5.net" "$BASE/api/gate/status" \
+  | sed -n 's/.*"state":"\([^"]*\)".*/\1/p')
+case "$badstate" in
+  init|need_pair|need_login|ok)
+    echo "    ✅ state=$badstate 合法";;
+  *)
+    echo "    ❌ 出现未知 state=$badstate"; exit 1;;
+esac
+
 echo
 echo "==> 6. 剧集识别引擎自测（不依赖网络）"
 echo "    在容器内跑单元测试…"

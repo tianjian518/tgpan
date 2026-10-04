@@ -266,7 +266,9 @@ func (m *extendedMiddleware) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	//     被闸门拦掉会丢 DAV 头 → 播放器直接判挂载失败，连密码框都不弹。
 	if g := m.srv.gate(); g != nil && !gateExemptRequest(r) {
 		st := g.Status(r)
-		if st.State == gateStateInit || st.State == gateStateNeedPair || st.State == gateStateNeedLogin {
+		// need_pair 属于「已放行、但还没配对 TG」——必须让请求通过，
+		// 否则配对页自己会被拦掉，用户永远配不上。
+		if st.State == gateStateInit || st.State == gateStateNeedLogin {
 			writeJSON(w, http.StatusUnauthorized, map[string]any{
 				"error": "gate not satisfied",
 				"gate":  st,
@@ -274,14 +276,19 @@ func (m *extendedMiddleware) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		// 闸门已放行（内网免密 / 已输密码）→ 检查请求是否已带有效凭证。
+		// 配对通道（/api/auth/*）需要特殊处理：
 		//
-		// 如果没有（换设备、内网免密入口），就从主凭证合成一个合法 JWT
-		// 塞进请求，让下游 ogen 鉴权自然通过。
+		// · need_pair —— 用户已放行但还没配对 TG，此刻系统里**没有任何
+		//   可用凭证**，SynthesizeAccessToken 也合成不出来。而配对页必须
+		//   连上 /auth/ws 扫码。这类请求跳过「合成凭证」这一步，
+		//   继续往下交给 ogen（这些接口自身就是登录逻辑，不挂安全要求）。
+		// · ok —— 已配对且已放行，同理放行让原逻辑工作（换 TG 账号等）。
 		//
-		// 必须在请求进入 ogen 之前做，因为 ogen 在「完全没带凭证」时
-		// 会直接判 security 不满足，压根不会走到主凭证兜底逻辑。
-		if m.srv.api != nil && m.srv.api.cnf != nil {
+		// 注意：只在闸门已放行（need_pair / ok）时才豁免；init 和
+		// need_login 在上面就被拦掉了，外网未登录的人无法借道这里绕过闸门。
+		//
+		// 这里**不能 return**：return 会直接丢掉请求，什么响应都不回。
+		if !gatePairPath(r.URL.Path) && m.srv.api != nil && m.srv.api.cnf != nil {
 			if tok, ok := g.SynthesizeAccessToken(m.srv.api.cnf.JWT.Secret); ok {
 				if _, err := r.Cookie(authCookieName); err != nil {
 					r.AddCookie(&http.Cookie{Name: authCookieName, Value: tok})

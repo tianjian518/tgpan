@@ -124,7 +124,7 @@
   // 首次部署：设置初始密码
   function renderSetup(msg, isError) {
     render(''
-      + '<div class="tgpan-gate-logo">🔐</div>'
+      + '<div class="tgpan-gate-logo"><svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="10" width="16" height="11" rx="2"/><path d="M8 10V7a4 4 0 0 1 8 0v3"/><circle cx="12" cy="15.5" r="1.2" fill="#fff" stroke="none"/></svg></div>'
       + '<h1 class="tgpan-gate-title">欢迎使用 TGPan</h1>'
       + '<p class="tgpan-gate-sub">第一次使用，请先给 TGPan 设一个管理密码。<br>'
       + '以后不管在手机还是电脑上打开，输这个密码就能进，<b>不用再扫码</b>。</p>'
@@ -134,7 +134,7 @@
       + '<input type="password" id="tgpan-gate-p2" placeholder="再输一次" autocomplete="new-password"></div>'
       + '<button class="tgpan-gate-btn" id="tgpan-gate-go">确定</button>'
       + '<div class="tgpan-gate-msg' + (isError ? '' : ' ok') + '" id="tgpan-gate-msg">' + (msg || '') + '</div>'
-      + '<div class="tgpan-gate-tip">💡 这个密码存在服务器上，容器重启也不会丢。'
+      + '<div class="tgpan-gate-tip"><b>提示</b> · 这个密码存在服务器上，容器重启也不会丢。'
       + '忘了的话，删掉数据目录里的 <span class="tgpan-gate-code">tgpan-gate.json</span> 就能重来。</div>'
     );
     var go = function () {
@@ -145,7 +145,7 @@
       if (a !== b) { setMsg('两次输入不一致', false); return; }
       state.busy = true;
       req('/gate/setup', { method: 'POST', body: { password: a } })
-        .then(function (st) { state.busy = false; applyStatus(st, '密码设置成功 ✅'); })
+        .then(function (st) { state.busy = false; applyStatus(st, '管理密码已设置'); })
         .catch(function (e) { state.busy = false; setMsg(e.message, false); });
     };
     var btn = document.getElementById('tgpan-gate-go');
@@ -159,18 +159,18 @@
   // 已有密码、未配对 TG：引导扫码
   function renderNeedPair(msg) {
     render(''
-      + '<div class="tgpan-gate-logo">🔗</div>'
+      + '<div class="tgpan-gate-logo"><svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 15l6-6"/><path d="M11 6l1-1a4 4 0 0 1 6 6l-1 1"/><path d="M13 18l-1 1a4 4 0 0 1-6-6l1-1"/></svg></div>'
       + '<h1 class="tgpan-gate-title">最后一步：连接你的 Telegram</h1>'
       + '<p class="tgpan-gate-sub">管理密码已设好。现在需要<b>扫一次码</b>把 TGPan '
       + '和你的 TG 账号绑起来。<br>这一步<b>只需要做这一次</b>，以后都不会再问。</p>'
       + '<ul class="tgpan-gate-steps">'
       + '<li>已有管理密码，以后进入只需输密码</li>'
       + '<li>内网 / 飞牛 OS 里打开，连密码都不用</li>'
-      + '<li>下面只需扫码配对一次 👇</li>'
+      + '<li>下面只需扫码配对一次</li>'
       + '</ul>'
-      + '<div class="tgpan-gate-msg' + (msg ? '' : ' ok') + '" id="tgpan-gate-msg">' + (msg || '请点击下方按钮继续') + '</div>'
+      + '<div class="tgpan-gate-msg ok" id="tgpan-gate-msg">' + (msg || '请点击下方按钮继续') + '</div>'
       + '<button class="tgpan-gate-btn" id="tgpan-gate-pair">去扫码配对</button>'
-      + '<div class="tgpan-gate-tip">💡 也可以直接在下面原来的登录界面里扫码。'
+      + '<div class="tgpan-gate-tip"><b>提示</b> · 也可以直接在下面原来的登录界面里扫码。'
       + '配对成功后，本页面会自动消失。</div>'
     );
     var btn = document.getElementById('tgpan-gate-pair');
@@ -180,14 +180,14 @@
   // 对外域名：输入管理密码
   function renderLogin(msg) {
     render(''
-      + '<div class="tgpan-gate-logo">🛡️</div>'
+      + '<div class="tgpan-gate-logo"><svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l7 3v6c0 4.5-3 7.5-7 9-4-1.5-7-4.5-7-9V6l7-3z"/><path d="M9 12l2 2 4-4"/></svg></div>'
       + '<h1 class="tgpan-gate-title">TGPan</h1>'
       + '<p class="tgpan-gate-sub">你正在通过外网域名访问，需要输入管理密码。</p>'
       + '<div class="tgpan-gate-field"><label>管理密码</label>'
       + '<input type="password" id="tgpan-gate-pwd" placeholder="请输入管理密码" autocomplete="current-password"></div>'
       + '<button class="tgpan-gate-btn" id="tgpan-gate-go">进入</button>'
       + '<div class="tgpan-gate-msg" id="tgpan-gate-msg">' + (msg || '') + '</div>'
-      + '<div class="tgpan-gate-tip">💡 在飞牛 OS 里打开 TGPan 可以免密码直接进。'
+      + '<div class="tgpan-gate-tip"><b>提示</b> · 在飞牛 OS 里打开 TGPan 可以免密码直接进。'
       + '这个密码在外网域名上才需要输。</div>'
     );
     var go = function () {

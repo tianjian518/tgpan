@@ -239,17 +239,29 @@ func (g *gateService) Status(r *http.Request) gateStatus {
 		st.Bypass = true
 		return st
 	}
+	// 判定顺序很重要，两条原则：
+	//   1. 「已通过管理密码」优先于「还没配对 TG」——否则用户输完密码
+	//      会被永远卡在配对页，密码登录形同虚设。
+	//   2. 「内网免密」优先于前面的所有检查——内网入口本就信任，
+	//      只需在首次部署时引导设密码，设完即可直进。
+	authed := r != nil && g.verifyCookie(r)
+	trustedHost := !g.hostNeedsLogin(st.Host)
+
 	switch {
 	case !st.HasPassword:
+		// 全新部署：先引导设置管理密码（内网/外网都一样，只做一次）
 		st.State = gateStateInit
-	case !st.Paired:
-		st.State = gateStateNeedPair
-	case !g.hostNeedsLogin(st.Host):
-		st.State = gateStateOK
-		st.Bypass = true
-	case r != nil && g.verifyCookie(r):
-		st.State = gateStateOK
+	case trustedHost || authed:
+		// 内网免密入口，或已通过管理密码验证
+		if !st.Paired {
+			// 还没配对 TG：放行进入配对页（这一步仍需要 TG 扫码，但只需一次）
+			st.State = gateStateNeedPair
+		} else {
+			st.State = gateStateOK
+			st.Bypass = trustedHost
+		}
 	default:
+		// 外网域名且未通过密码验证
 		st.State = gateStateNeedLogin
 	}
 	return st
