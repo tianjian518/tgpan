@@ -329,10 +329,61 @@ func setupServer(cfg *config.ServerCmdConfig, db *gorm.DB, cache cache.Cacher, l
 	// 注意不要 StripPrefix：处理器内部按 /webdav 前缀解析路径并生成 href，
 	// 剥掉前缀会导致 PROPFIND 返回的链接指向错误位置，播放器点不开。
 	mux.Mount("/api/", http.StripPrefix("/api", extendedSrv))
+
+	// 凭据管理接口的「不带 /api」形式：/webdav/credentials[/{id}]
+	//
+	// 为什么需要这条：上面 rootHandler 已把 /webdav/* 整体交给 WebDAV 处理器，
+	// 但凭据接口是网页调用的、走闸门 cookie 而非 Basic。所以要在这里
+	// 把它单独接管回来，交给 extendedSrv（它会剥掉 /webdav 前缀再分发）。
+	//
+	// 用 HandleFunc + 方法掩码：这几个都是标准方法（GET/POST/DELETE），
+	// 不涉及 PROPFIND 那类 chi 不认的方法。
+	mux.HandleFunc("/webdav/credentials", func(w http.ResponseWriter, r *http.Request) {
+		r2 := r.Clone(r.Context())
+		r2.URL.Path = "/webdav/credentials"
+		extendedSrv.ServeHTTP(w, r2)
+	})
+	mux.HandleFunc("/webdav/credentials/", func(w http.ResponseWriter, r *http.Request) {
+		r2 := r.Clone(r.Context())
+		r2.URL.Path = r.URL.Path
+		extendedSrv.ServeHTTP(w, r2)
+	})
+
 	mux.Handle("/*", middleware.SPAHandler(ui.StaticFS))
 
 	rootHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if strings.HasPrefix(r.URL.Path, "/webdav") {
+		p := r.URL.Path
+
+		// ---- WebDAV 文件访问：绕开 chi ----
+		//
+		// 挂到 HTTP 层是为了绕开 chi 的方法白名单（PROPFIND/MKCOL 等
+		// 不在 chi 的 methodMap 里，走 mux 一律 405）。
+		//
+		// 两种入口都要接管：
+		//   /webdav/...      播放器直接填的地址
+		//   /api/webdav/...  某些客户端会自动加 /api
+		//
+		// 但都要排除 /webdav/credentials —— 那是网页用的凭据管理接口，
+		// 走闸门 cookie 认证，必须交给 extendedSrv 正常分发，
+		// 不能被当成 DAV 路径返回 Basic 401。
+		isCred := p == "/webdav/credentials" ||
+			strings.HasPrefix(p, "/webdav/credentials/") ||
+			p == "/api/webdav/credentials" ||
+			strings.HasPrefix(p, "/api/webdav/credentials/")
+
+		if !isCred && (strings.HasPrefix(p, "/webdav") || strings.HasPrefix(p, "/api/webdav")) {
+			// 把 /api/webdav/... 归一成 /webdav/... 再交给处理器。
+			//
+			// 为什么不在处理器里兼容两种前缀：WebDAV 处理器要按路径
+			// 反查网盘目录（parsePath），前缀形态越多越容易漏。在这里
+			// 一次性归一，下游就只需认识一种形态，href 也不会指错。
+			if strings.HasPrefix(p, "/api/webdav") {
+				r2 := r.Clone(r.Context())
+				r2.URL.Path = strings.TrimPrefix(p, "/api")
+				r2.RequestURI = r2.URL.Path
+				extendedSrv.ServeHTTP(w, r2)
+				return
+			}
 			extendedSrv.ServeHTTP(w, r)
 			return
 		}

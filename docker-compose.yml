@@ -51,6 +51,9 @@ services:
       #
       # 闸门数据文件路径（管理密码哈希 + TG 主凭证），默认 /data/tgpan-gate.json
       # 注意：删掉这个文件 = 恢复出厂设置，需要重新设密码并重新扫码配对
+      #
+      # ⚠️ 如果你的配置目录不是 /data（比如挂在 /config），**必须**显式指定，
+      #    否则闸门会读不到已有的密码文件，当成全新部署、重新引导你设密码。
       # - TELDRIVE_GATE_DATA_FILE=/data/tgpan-gate.json
       #
       # 想彻底关掉闸门、回到「只能用 TG 扫码」的原版行为，设为 true

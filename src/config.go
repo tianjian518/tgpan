@@ -175,6 +175,31 @@ type DBConfig struct {
 	DataSource  string `validate:"required" default:"" description:"Database connection string"`
 	PrepareStmt bool   `default:"true" description:"Use prepared statements"`
 	Pool        DBPool
+
+	// Tune 开启连接级性能调优（默认开）。
+	//
+	// 为什么需要：Postgres 的默认参数是"通用工作负载"取向，
+	// 对 TGPan 这种"读多写少、单机自用"的场景有两个明显浪费：
+	//
+	//   1. synchronous_commit=on 让**每一次**写入都等 WAL 落盘。
+	//      自用场景下机器断电丢最后几秒数据并不致命，
+	//      改成 off 后批量导入（扫描落库）的写入耗时能降一个数量级。
+	//      注意：它只影响"提交后何时可见于崩溃恢复"，
+	//      **不会**破坏事务一致性和原子性，数据不会坏。
+	//
+	//   2. work_mem 默认 4MB，而 TGPan 有几个排序/聚合查询
+	//      （目录列表排序、按分类统计）会超，一超就落盘做外部排序，
+	//      慢十几倍。调到 16MB 基本都能在内存里做完。
+	//
+	// 代价：内存占用略增（work_mem 是按查询节点分配，不是全局）。
+	// 自用实例几个连接同时跑，多占几十 MB，可以忽略。
+	//
+	// 设成 false 可完全关掉，回到 Postgres 默认行为 ——
+	// 如果你把数据库放在共享实例上，或者特别在意断电不丢数据，就关掉。
+	Tune bool `default:"true" description:"Apply connection-level Postgres performance tuning"`
+
+	// TuneWorkMemMB work_mem 的大小（MB）。仅在 Tune=true 时生效。
+	TuneWorkMemMB int `default:"16" description:"work_mem in MB for tuning (0 = leave default)"`
 }
 
 type CronJobConfig struct {
@@ -190,6 +215,27 @@ type TGStream struct {
 	Buffers      int           `default:"8" description:"Number of stream buffers"`
 	ChunkTimeout time.Duration `default:"30s" description:"Chunk download timeout"`
 	BotsLimit    int           `default:"0" description:"Maximum number of bots for streaming (0 = use all bots)"`
+
+	// PrefetchWindows 滑动窗口预取：**只对第二轮之后**的窗口做并发放大。
+	//
+	// 背景（照抄自同类项目的真机实测）：
+	//
+	//	同一部 3984MB 的 mp4，只改并发窗口数：
+	//	  1 路  首字节 0.97s  吞吐 0.71 MB/s
+	//	  4 路  首字节 13.34s  吞吐 1.19 MB/s   ← 首字节退化了 13 倍
+	//	  8 路  首字节 26.45s  吞吐 0.60 MB/s   ← 比串行还慢
+	//
+	// 原因：播放器点开的那一瞬间要的是「马上有 100KB 能解码」，
+	// 不是「一次性把 4MB 全部拿回来」。多路并发会让每一路都去
+	// 排队、握手、等 DC 分配，谁都拿不到第一块。
+	//
+	// 所以这里的做法是：**首个窗口永远只发 1 个请求**（见 FirstWindowChunks），
+	// 等它回来了、播放器开始播了，后面的窗口再按 PrefetchWindows 放大。
+	// 这样起播延迟和吞吐就不再互相打架。
+	PrefetchWindows int `default:"8" description:"Concurrency multiplier for windows AFTER the first one (first window is always 1 request)"`
+
+	// FirstWindowChunks 首个窗口发几个 chunk 请求。默认 1，别改。
+	FirstWindowChunks int `default:"1" description:"Number of chunk requests in the first window (keep at 1 for fastest start)"`
 }
 
 type TGUpload struct {

@@ -53,11 +53,14 @@ func TestGateStateMachine(t *testing.T) {
 		t.Fatalf("after password state = %q, want %q", st.State, gateStateNeedLogin)
 	}
 
-	// 2b) 同一个「设了密码但没配对」的状态，换成内网 Host → 免密进配对页
+	// 2b) 同一个「设了密码但没配对」的状态，换成内网 Host → 直接放行。
+	//
+	//     注意：v2.7.0 起 TG 配对不再拦路。内网 / 密码登录已是充分条件，
+	//     配对只作为可选提示。所以这里期望 ok 而不是 need_pair。
 	rLAN0 := httptest.NewRequest("GET", "http://10.0.0.119:30141/", nil)
 	rLAN0.Host = "10.0.0.119:30141"
-	if st := g.Status(rLAN0); st.State != gateStateNeedPair {
-		t.Fatalf("LAN unpaired state = %q, want %q", st.State, gateStateNeedPair)
+	if st := g.Status(rLAN0); st.State != gateStateOK {
+		t.Fatalf("LAN unpaired state = %q, want %q", st.State, gateStateOK)
 	}
 
 	// 3) 配对 TG 后，对外域名 → need_login
@@ -77,8 +80,10 @@ func TestGateStateMachine(t *testing.T) {
 }
 
 // TestGateLoggedInButNotPaired 是回归测试：
-// 用户已经输对了管理密码、但还没配对 TG 时，必须放行进配对页，
-// 不能被「!Paired」分支提前拦回 need_login（否则密码登录永远卡死）。
+// 用户已经输对了管理密码、但还没配对 TG 时，必须直接放行。
+//
+// v2.7.0 之前的实现会返回 need_pair，把用户卡在一个"去扫码"的整屏页面，
+// 导致不配对 TG 就什么都干不了。现在配对只是可选提示，密码就是通行证。
 func TestGateLoggedInButNotPaired(t *testing.T) {
 	g := newTestGate(t, []string{"pan.2016.de5.net"})
 	if err := g.SetPassword("", "test1234"); err != nil {
@@ -92,11 +97,11 @@ func TestGateLoggedInButNotPaired(t *testing.T) {
 	r.AddCookie(&http.Cookie{Name: gateCookieName, Value: tok})
 
 	st := g.Status(r)
-	if st.State != gateStateNeedPair {
-		t.Fatalf("logged-in but unpaired state = %q, want %q", st.State, gateStateNeedPair)
+	if st.State != gateStateOK {
+		t.Fatalf("logged-in but unpaired state = %q, want %q", st.State, gateStateOK)
 	}
 
-	// 配对之后同一个 Cookie 必须变成 ok（不再是 need_login）
+	// 配对之后同一个 Cookie 依然是 ok（行为不变）
 	if err := g.StoreMaster("FAKESESSION123", 42, "hash42", "alice", "Alice"); err != nil {
 		t.Fatalf("StoreMaster: %v", err)
 	}
@@ -274,8 +279,9 @@ func TestGateClearMaster(t *testing.T) {
 	}
 	r := httptest.NewRequest("GET", "http://x/", nil)
 	r.Host = "x"
-	if st := g.Status(r); st.State != gateStateNeedPair {
-		t.Fatalf("state after clear = %q, want %q", st.State, gateStateNeedPair)
+	// 清了 TG 凭证但密码还在 → 仍可直接进入（配对是可选项，v2.7.0 起不再拦路）
+	if st := g.Status(r); st.State != gateStateOK {
+		t.Fatalf("state after clear = %q, want %q", st.State, gateStateOK)
 	}
 }
 
@@ -390,7 +396,12 @@ func TestGateExemptPaths(t *testing.T) {
 	}
 }
 
-// TestGateExemptRequest WebDAV 的 OPTIONS 探测必须豁免（否则爆米花挂不上）。
+// TestGateExemptRequest WebDAV 请求必须整体豁免闸门。
+//
+// 为什么是整体而不是只放行 OPTIONS：WebDAV 有自己的 HTTP Basic 认证。
+// 播放器挂载后紧接着发的 PROPFIND 带的是 Basic 凭据、不是闸门 Cookie；
+// 若被闸门拦成 401，客户端只会认为"密码错"，而不是"该去浏览器登录"，
+// 表现为挂载死活连不上。放行只把请求交给 webdav.go，那里照样会 401。
 func TestGateExemptRequest(t *testing.T) {
 	mk := func(method, path string) *http.Request {
 		r := httptest.NewRequest(method, "http://example.com"+path, nil)
@@ -405,6 +416,11 @@ func TestGateExemptRequest(t *testing.T) {
 		{"OPTIONS", "/webdav"},
 		{"OPTIONS", "/webdav/"},
 		{"OPTIONS", "/api/webdav"},
+		{"PROPFIND", "/webdav"},
+		{"PROPFIND", "/webdav/"},
+		{"GET", "/webdav"},
+		{"GET", "/api/webdav/"},
+		{"OPTIONS", "/api/webdav/"},
 	}
 	for _, c := range yes {
 		if !gateExemptRequest(mk(c[0], c[1])) {
@@ -412,12 +428,11 @@ func TestGateExemptRequest(t *testing.T) {
 		}
 	}
 
-	// 必须拦截（非 OPTIONS 的 WebDAV 请求照常走认证）
+	// 这些必须照常拦截（WebDAV 凭据管理接口是给网页用的，走闸门校验）
 	no := [][2]string{
 		{"GET", "/files"},
 		{"GET", "/api/users/config"},
-		{"PROPFIND", "/webdav"},
-		{"GET", "/webdav"},
+		{"GET", "/api/uploads"},
 	}
 	for _, c := range no {
 		if gateExemptRequest(mk(c[0], c[1])) {

@@ -357,3 +357,125 @@ func chineseNumToInt(s string) int {
 	}
 	return 1
 }
+
+// ===========================================================================
+//  影视分类（电影 / 电视剧 / 动漫 / 其他）
+//
+//  目标：频道扫描进来后，让用户一眼看清"这是个电影"还是"这是部电视剧"，
+//  并且把它们分门别类放进子文件夹，方便网易爆米花这类播放器刮削。
+//
+//  判定依据（按可靠度）：
+//    1. 已经识别出剧集（SxxExx / 第N集）        → 电视剧
+//    2. 文件名/配文里出现「动画」「动漫」「番剧」等 → 动漫
+//    3. 出现年份 + 分辨率/压制组等电影特征，且无集数 → 电影
+//    4. 中文剧名 + 「全集」「完结」等             → 电视剧
+//    5. 其余                                   → 其他
+//
+//  设计原则同剧集识别：宁可归到「其他」，也不要瞎猜。
+// ===========================================================================
+
+// MediaKind 是影视分类结果。
+type MediaKind string
+
+const (
+	KindMovie  MediaKind = "movie"  // 电影
+	KindTV     MediaKind = "tv"     // 电视剧
+	KindAnime  MediaKind = "anime"  // 动漫
+	KindOther  MediaKind = "other"  // 其他 / 认不出
+)
+
+// KindFolderName 返回分类对应的文件夹名（给扫描归档用）。
+func KindFolderName(k MediaKind) string {
+	switch k {
+	case KindMovie:
+		return "电影"
+	case KindTV:
+		return "电视剧"
+	case KindAnime:
+		return "动漫"
+	default:
+		return ""
+	}
+}
+
+// animeHints 动漫关键词。命中即判为动漫。
+var animeHints = []string{
+	"动漫", "动画", "番剧", "新番", "国漫", "日漫", "剧场版",
+	"anime", "animation", "ova", "oad",
+}
+
+// movieHints 电影特征词。注意不要放太松的词（比如单独的"电影"两个字
+// 在频道名里很常见，容易误判）——只放强特征。
+var movieHints = []string{
+	"电影", "高清完整版", "蓝光", "bluray", "blu-ray", "web-dl", "webdl",
+	"hdts", "hdcam", "抢先版", "枪版", "remux",
+}
+
+// tvHints 电视剧特征词。
+var tvHints = []string{
+	"全集", "完结", "更新至", "连载", "第1集", "第一集", "国语版", "粤语版",
+	"tv版", "season", "第一季", "第二季",
+}
+
+// releaseYearRe 匹配独立的四位年份（1900-2099），用于电影识别。
+var releaseYearRe = regexp.MustCompile(`(?:^|[\s\.\[\]\(\)\-_])(19\d{2}|20\d{2})(?:[\s\.\[\]\(\)\-_]|$)`)
+
+// resolutionRe 匹配分辨率标记。
+var resolutionRe = regexp.MustCompile(`(?i)(2160p|1080p|720p|480p|4k|uhd|hd)`)
+
+// containsAny 判断 s 是否包含 keywords 中任意一个（大小写不敏感）。
+func containsAny(s string, keywords []string) bool {
+	if s == "" {
+		return false
+	}
+	low := strings.ToLower(s)
+	for _, k := range keywords {
+		if strings.Contains(low, strings.ToLower(k)) {
+			return true
+		}
+	}
+	return false
+}
+
+// ClassifyMedia 判断一个视频属于电影 / 电视剧 / 动漫 / 其他。
+//
+// fname 是文件名，caption 是消息配文（都可为空）。
+// isSeries 是上游剧集识别的结果 —— 只要认出集数，直接算电视剧
+// （动漫剧集同样有集数，所以动漫要排在前面判断）。
+func ClassifyMedia(fname, caption string, isSeries bool) MediaKind {
+	blob := fname + " " + caption
+
+	// 1. 动漫优先：动漫剧集也有 SxxExx，但用户更关心"这是动漫"
+	if containsAny(blob, animeHints) {
+		return KindAnime
+	}
+
+	// 2. 认出集数 → 电视剧
+	if isSeries {
+		return KindTV
+	}
+
+	// 3. 电视剧特征词
+	if containsAny(blob, tvHints) {
+		return KindTV
+	}
+
+	// 4. 电影特征：强特征词，或「年份 + 分辨率」组合
+	if containsAny(blob, movieHints) {
+		return KindMovie
+	}
+	if releaseYearRe.MatchString(fname) && resolutionRe.MatchString(blob) {
+		return KindMovie
+	}
+
+	// 5. 只有中文片名、无任何集数/季数标记 —— 更可能是电影
+	//    （剧集一般都会带集数，认不出集数的多半是电影资源）
+	if containsChinese(fname) {
+		base := strings.TrimSuffix(fname, path.Ext(fname))
+		if base != "" && !strings.Contains(base, "集") && !strings.Contains(base, "季") {
+			return KindMovie
+		}
+	}
+
+	return KindOther
+}

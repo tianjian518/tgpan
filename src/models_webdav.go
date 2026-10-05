@@ -55,3 +55,31 @@ type ChannelScan struct {
 }
 
 func (ChannelScan) TableName() string { return "channel_scans" }
+
+// TGDialog 是「这个 TG 账号关注了哪些频道」的本地缓存。
+//
+// 为什么要有这张表：
+//
+//	扫描页要让用户直接从已关注的频道里挑，而不是手填 ID。但拉对话列表
+//	只能走真实 TG 会话（messages.getDialogs），一次要几百毫秒到几秒，
+//	还可能吃限流。放在 HTTP 请求里同步拉，用户会一直盯着转圈。
+//
+// 所以后台定时同步进这张表，接口只读库，毫秒级返回。
+type TGDialog struct {
+	// UserId + ChannelId 是复合主键：同一个频道被多个账号关注是正常的，
+	// 各记各的，互不覆盖。
+	UserId    int64 `gorm:"type:bigint;primaryKey"`
+	ChannelId int64 `gorm:"type:bigint;primaryKey"`
+	// AccessHash 拿到后可以直接构造 InputPeer，
+	// 省掉每次 ChannelsGetChannels 的一次往返 —— 对话列表本来就带了，白扔可惜。
+	AccessHash int64  `gorm:"type:bigint;not null;default:0"`
+	Title      string `gorm:"type:text"`
+	Username   string `gorm:"type:text"`
+	// IsChannel 区分「频道」和「群组」。群组默认不列在扫描页 ——
+	// 群聊里很少有人发影视资源，混进去只会让列表变长。
+	IsChannel   bool      `gorm:"type:bool;not null;default:true"`
+	MemberCount int       `gorm:"type:int;default:0"`
+	SyncedAt    time.Time `gorm:"default:timezone('utc'::text, now())"`
+}
+
+func (TGDialog) TableName() string { return "tg_dialogs" }

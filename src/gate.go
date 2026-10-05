@@ -252,14 +252,14 @@ func (g *gateService) Status(r *http.Request) gateStatus {
 		// 全新部署：先引导设置管理密码（内网/外网都一样，只做一次）
 		st.State = gateStateInit
 	case trustedHost || authed:
-		// 内网免密入口，或已通过管理密码验证
-		if !st.Paired {
-			// 还没配对 TG：放行进入配对页（这一步仍需要 TG 扫码，但只需一次）
-			st.State = gateStateNeedPair
-		} else {
-			st.State = gateStateOK
-			st.Bypass = trustedHost
-		}
+		// 内网免密入口，或已通过管理密码验证 → 一律放行进入主界面。
+		//
+		// v2.7.0 改动：以前这里若 !Paired 会返回 need_pair，把用户卡在配对页，
+		// 导致「没配对 TG = 整个界面进不去」（连扫描入口都被藏了）。
+		// 现在「管理密码 / 内网」就是充分条件，TG 配对降级成一个可跳过的提示
+		// （前端在 need_pair 时只挂一条提示条，不盖界面）。
+		st.State = gateStateOK
+		st.Bypass = trustedHost
 	default:
 		// 外网域名且未通过密码验证
 		st.State = gateStateNeedLogin

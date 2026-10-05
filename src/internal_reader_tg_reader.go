@@ -1,0 +1,305 @@
+package reader
+
+import (
+	"context"
+	"fmt"
+	"io"
+	"sync"
+	"time"
+
+	"github.com/go-faster/errors"
+
+	"github.com/gotd/td/tg"
+	"github.com/tgdrive/teldrive/internal/cache"
+	"github.com/tgdrive/teldrive/internal/config"
+	"github.com/tgdrive/teldrive/internal/logging"
+	"github.com/tgdrive/teldrive/internal/tgc"
+	"go.uber.org/zap"
+	"golang.org/x/sync/errgroup"
+)
+
+var (
+	ErrStreamAbandoned = errors.New("stream abandoned")
+	ErrChunkTimeout    = errors.New("chunk fetch timed out")
+)
+
+type ChunkSource interface {
+	Chunk(ctx context.Context, offset int64, limit int64) ([]byte, error)
+	ChunkSize(start, end int64) int64
+}
+
+type chunkSource struct {
+	channelId int64
+	partId    int64
+	client    *tg.Client
+	key       string
+	cache     cache.Cacher
+}
+
+func (c *chunkSource) ChunkSize(start, end int64) int64 {
+	return tgc.CalculateChunkSize(start, end)
+}
+
+func (c *chunkSource) Chunk(ctx context.Context, offset int64, limit int64) ([]byte, error) {
+	var (
+		location tg.InputDocumentFileLocation
+		err      error
+	)
+
+	err = c.cache.Get(ctx, c.key, &location)
+
+	if err != nil {
+		loc, err := tgc.GetLocation(ctx, c.client, c.channelId, c.partId)
+		if err != nil {
+			return nil, err
+		}
+		c.cache.Set(ctx, c.key, loc, 30*time.Minute)
+		location = *loc
+	}
+
+	return tgc.GetChunk(ctx, c.client, &location, offset, limit)
+
+}
+
+type tgMultiReader struct {
+	ctx         context.Context
+	cancel      context.CancelFunc
+	offset      int64
+	limit       int64
+	chunkSize   int64
+	bufferChan  chan *buffer
+	cur         *buffer
+	leftCut     int64
+	rightCut    int64
+	totalParts  int
+	currentPart int
+	chunkSrc    ChunkSource
+	timeout     time.Duration
+	logger      *zap.Logger
+	closeOnce   sync.Once
+
+	// ---- 滑动窗口 ----
+	//
+	// firstWindow 还剩几轮（每轮 1 个请求）要走"窄窗口"。
+	// 这个值的语义是"要额外走几轮"，windowCount 走完就按 prefetch 放大。
+	firstWindow      int
+	prefetchWindows  int
+	firstWindowDone  bool
+	chunksDownloaded int64 // 已从 TG 拉下来的 chunk 数（用于日志/统计，不算命中）
+}
+
+// windowConcurrency 决定「当前这一轮」应该发多少个并发 chunk 请求。
+//
+// 核心思路（滑动窗口）：
+//
+//	第一轮：只发 1 个 -> 首字节最快，播放器立刻有数据可解码
+//	后续轮：发 prefetchWindows 个 -> 吞吐跟上，边播边预取
+//
+// 参考项目真机实测（3984MB mp4）：
+//
+//	全程 1 路   首字节 0.97s
+//	全程 4 路   首字节 13.34s
+//	全程 8 路   首字节 26.45s（比串行还慢）
+//
+// 说明"首窗口必须窄"不是玄学，是实测出来的。
+func (r *tgMultiReader) windowConcurrency() int {
+	if !r.firstWindowDone {
+		return 1
+	}
+	if r.prefetchWindows < 1 {
+		return 1
+	}
+	// 不超过剩下的分片数，避免为一个 512KB 的尾巴开 8 路
+	if left := r.totalParts - r.currentPart; left < r.prefetchWindows {
+		if left < 1 {
+			return 1
+		}
+		return left
+	}
+	return r.prefetchWindows
+}
+
+func newTGMultiReader(
+	ctx context.Context,
+	start int64,
+	end int64,
+	config *config.TGConfig,
+	chunkSrc ChunkSource,
+) (*tgMultiReader, error) {
+	chunkSize := chunkSrc.ChunkSize(start, end)
+	offset := start - (start % chunkSize)
+
+	ctx, cancel := context.WithCancel(ctx)
+
+	// 首窗口并发：默认 1。允许用户配成更多，但真机数据表明配大只会变慢。
+	firstWindowChunks := config.Stream.FirstWindowChunks
+	if firstWindowChunks < 1 {
+		firstWindowChunks = 1
+	}
+
+	// 后续窗口并发：取 PrefetchWindows 和 Concurrency 里更大的那个。
+	//
+	// 为什么还要兜底 Concurrency：这个字段是老配置项（老用户可能已经在
+	// 配置文件里写过 stream.concurrency = 4）。新逻辑以 PrefetchWindows
+	// 为准，但如果用户只配了老字段没配新字段，取最大值能保住他的预期，
+	// 不至于"我明明配了 4 路怎么还是 1 路"。
+	prefetch := config.Stream.PrefetchWindows
+	if config.Stream.Concurrency > prefetch {
+		prefetch = config.Stream.Concurrency
+	}
+	if prefetch < 1 {
+		prefetch = 1
+	}
+
+	r := &tgMultiReader{
+		ctx:        ctx,
+		cancel:     cancel,
+		limit:      end - start + 1,
+		bufferChan: make(chan *buffer, config.Stream.Buffers),
+		leftCut:    start - offset,
+		rightCut:   (end % chunkSize) + 1,
+		totalParts: int((end - offset + chunkSize) / chunkSize),
+		offset:     offset,
+		chunkSize:  chunkSize,
+		chunkSrc:   chunkSrc,
+		timeout:    config.Stream.ChunkTimeout,
+		logger:     logging.FromContext(ctx),
+
+		// 首窗口要走几轮"窄窗口"。firstWindowChunks=1 时只需要 1 轮。
+		firstWindow:     firstWindowChunks,
+		prefetchWindows: prefetch,
+	}
+
+	go r.fillBuffer()
+	return r, nil
+}
+
+func (r *tgMultiReader) Close() error {
+	r.closeOnce.Do(func() {
+		r.cancel()
+	})
+	return nil
+}
+
+func (r *tgMultiReader) Read(p []byte) (int, error) {
+	if r.limit <= 0 {
+		return 0, io.EOF
+	}
+
+	if r.cur == nil || r.cur.isEmpty() {
+		select {
+		case cur, ok := <-r.bufferChan:
+			if !ok {
+				return 0, ErrStreamAbandoned
+			}
+			r.cur = cur
+		case <-r.ctx.Done():
+			return 0, r.ctx.Err()
+		}
+	}
+
+	n := copy(p, r.cur.buffer())
+	r.cur.increment(n)
+	r.limit -= int64(n)
+
+	if r.limit <= 0 {
+		return n, io.EOF
+	}
+
+	return n, nil
+}
+
+func (r *tgMultiReader) fillBuffer() {
+	defer close(r.bufferChan)
+
+	for r.currentPart < r.totalParts {
+		if err := r.fillBatch(); err != nil {
+			r.cancel()
+			return
+		}
+	}
+}
+
+func (r *tgMultiReader) fillBatch() error {
+	// 滑动窗口：这一轮发多少个请求，由 windowConcurrency 决定。
+	// 第一轮恒为 1（首字节优先），之后放大到 prefetchWindows（吞吐优先）。
+	n := r.windowConcurrency()
+
+	g, ctx := errgroup.WithContext(r.ctx)
+	g.SetLimit(n)
+
+	buffers := make([]*buffer, n)
+
+	// 记录本轮基准位置，避免在 goroutine 里读 r.currentPart 时被下一轮改掉。
+	basePart := r.currentPart
+	baseOffset := r.offset
+
+	for i := 0; i < n && basePart+i < r.totalParts; i++ {
+		g.Go(func() error {
+			chunkCtx, cancel := context.WithTimeout(ctx, r.timeout)
+			defer cancel()
+
+			chunk, err := r.chunkSrc.Chunk(chunkCtx, baseOffset+int64(i)*r.chunkSize, r.chunkSize)
+			if err != nil {
+				if errors.Is(err, context.DeadlineExceeded) {
+					return fmt.Errorf("chunk %d: %w", basePart+i, ErrChunkTimeout)
+				}
+				return err
+			}
+
+			if r.totalParts == 1 {
+				chunk = chunk[r.leftCut:r.rightCut]
+			} else if basePart+i == 0 {
+				chunk = chunk[r.leftCut:]
+			} else if basePart+i+1 == r.totalParts {
+				chunk = chunk[:r.rightCut]
+			}
+
+			buffers[i] = &buffer{buf: chunk}
+			return nil
+		})
+	}
+
+	if err := g.Wait(); err != nil {
+		if !errors.Is(err, context.Canceled) {
+			r.logger.Error("stream.chunk_failed", zap.Error(err), zap.Int("part", r.currentPart), zap.Int("total_parts", r.totalParts))
+		}
+
+		return err
+	}
+
+	// 本轮实际成功取回了几个（buffers 里非 nil 的个数就是本轮窗口宽度）
+	got := 0
+	for _, buf := range buffers {
+		if buf == nil {
+			break
+		}
+		got++
+		select {
+		case r.bufferChan <- buf:
+		case <-r.ctx.Done():
+			return r.ctx.Err()
+		}
+	}
+
+	if got == 0 {
+		// 一轮一个都没拿到（正常情况下 g.Wait 已经返回错误，
+		// 这里是防御性兜底），必须退出，否则死循环。
+		return errors.New("stream window returned no data")
+	}
+
+	r.currentPart += got
+	r.offset += r.chunkSize * int64(got)
+	r.chunksDownloaded += int64(got)
+
+	// 走完首窗口，之后放并发。注意判断条件是"当前指针已经越过首窗口边界"，
+	// 而不是"这一轮跑了几个" —— 这样即使首窗口被拆成多轮，也只会窄一次。
+	if !r.firstWindowDone {
+		r.firstWindow--
+		if r.firstWindow <= 0 || r.currentPart >= r.totalParts {
+			r.firstWindowDone = true
+		}
+	}
+
+	return nil
+}

@@ -12,6 +12,11 @@
  *
  *  免密入口（内网 / 飞牛 OS）后端直接放行，前端什么都不用做。
  *
+ *  v2.7.0 改动：配对这一步不再是「拦路虎」。
+ *  以前 need_pair 会盖住整个界面，不配对就什么都干不了（连扫描按钮都被藏了）。
+ *  现在 need_pair 只作为一个「可跳过的提示条」显示，点一下就进主界面。
+ *  用户要的是「只留管理密码」—— TG 配对交给频道扫描时再按需完成。
+ *
  *  实现方式：旁挂式。不改压缩后的 SPA 产物，而是先盖一层遮罩，
  *  由后端 /gate/status 决定显示哪块。状态满足后才把遮罩撤掉。
  * ---------------------------------------------------------------------------
@@ -117,6 +122,18 @@
     overlay().innerHTML = '<div class="tgpan-gate-card">' + html + '</div>';
   }
 
+  // escHtml 转义要拼进 innerHTML 的动态文本。
+  //
+  // 这里的 msg 大多来自服务端返回的 message 字段。虽然目前后端消息是自己
+  // 写的，但「把外部字符串直接拼进 innerHTML」本身就是个洞 —— 哪天后端
+  // 把用户输入（比如密码错误提示里带上输入值）原样回显，就变成注入点了。
+  // 所以统一收口：凡是拼进 HTML 的动态文本，一律先过这个函数。
+  function escHtml(s) {
+    return String(s === null || s === undefined ? '' : s)
+      .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+  }
+
   // ---------------------------------------------------------------------
   //  各状态界面
   // ---------------------------------------------------------------------
@@ -133,7 +150,7 @@
       + '<div class="tgpan-gate-field"><label>再输一次确认</label>'
       + '<input type="password" id="tgpan-gate-p2" placeholder="再输一次" autocomplete="new-password"></div>'
       + '<button class="tgpan-gate-btn" id="tgpan-gate-go">确定</button>'
-      + '<div class="tgpan-gate-msg' + (isError ? '' : ' ok') + '" id="tgpan-gate-msg">' + (msg || '') + '</div>'
+      + '<div class="tgpan-gate-msg' + (isError ? '' : ' ok') + '" id="tgpan-gate-msg">' + escHtml(msg || '') + '</div>'
       + '<div class="tgpan-gate-tip"><b>提示</b> · 这个密码存在服务器上，容器重启也不会丢。'
       + '忘了的话，删掉数据目录里的 <span class="tgpan-gate-code">tgpan-gate.json</span> 就能重来。</div>'
     );
@@ -156,25 +173,38 @@
     if (p1) p1.focus();
   }
 
-  // 已有密码、未配对 TG：引导扫码
+  // 已有密码、未配对 TG：**不拦路**，只在角落挂一条可关闭的提示。
+  //
+  // v2.7.0 以前这里会盖满整屏，导致「不配对 → 什么都进不去」。
+  // 现在改成非阻塞提示：管理密码已经能证明身份，TG 配对是后续扫描时才需要。
   function renderNeedPair(msg) {
-    render(''
-      + '<div class="tgpan-gate-logo"><svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 15l6-6"/><path d="M11 6l1-1a4 4 0 0 1 6 6l-1 1"/><path d="M13 18l-1 1a4 4 0 0 1-6-6l1-1"/></svg></div>'
-      + '<h1 class="tgpan-gate-title">最后一步：连接你的 Telegram</h1>'
-      + '<p class="tgpan-gate-sub">管理密码已设好。现在需要<b>扫一次码</b>把 TGPan '
-      + '和你的 TG 账号绑起来。<br>这一步<b>只需要做这一次</b>，以后都不会再问。</p>'
-      + '<ul class="tgpan-gate-steps">'
-      + '<li>已有管理密码，以后进入只需输密码</li>'
-      + '<li>内网 / 飞牛 OS 里打开，连密码都不用</li>'
-      + '<li>下面只需扫码配对一次</li>'
-      + '</ul>'
-      + '<div class="tgpan-gate-msg ok" id="tgpan-gate-msg">' + (msg || '请点击下方按钮继续') + '</div>'
-      + '<button class="tgpan-gate-btn" id="tgpan-gate-pair">去扫码配对</button>'
-      + '<div class="tgpan-gate-tip"><b>提示</b> · 也可以直接在下面原来的登录界面里扫码。'
-      + '配对成功后，本页面会自动消失。</div>'
-    );
-    var btn = document.getElementById('tgpan-gate-pair');
-    if (btn) btn.onclick = function () { removeOverlay(); };
+    // 先把可能存在的整屏遮罩撤掉
+    removeOverlay();
+
+    var bar = document.getElementById('tgpan-pair-bar');
+    if (bar && bar.parentNode) bar.parentNode.removeChild(bar);
+
+    bar = document.createElement('div');
+    bar.id = 'tgpan-pair-bar';
+    bar.style.cssText = 'position:fixed;left:50%;transform:translateX(-50%);bottom:18px;'
+      + 'z-index:2147482000;max-width:92vw;display:flex;align-items:center;gap:12px;'
+      + 'padding:11px 14px;border-radius:10px;background:#1e293b;color:#e2e8f0;'
+      + 'box-shadow:0 10px 30px rgba(0,0,0,.32);font-size:13.5px;'
+      + 'font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC",sans-serif;';
+    bar.innerHTML = '<span>TGPan 还没和 Telegram 配对。去「系统设置 → 扫描频道」扫描时如果提示未登录，再来配一次即可。</span>'
+      + '<button id="tgpan-pair-go" style="flex:none;padding:6px 14px;border:none;border-radius:7px;'
+      + 'background:#2563eb;color:#fff;font-size:13px;cursor:pointer;">去配对</button>'
+      + '<button id="tgpan-pair-x" style="flex:none;background:none;border:none;color:#94a3b8;'
+      + 'font-size:17px;cursor:pointer;line-height:1;">×</button>';
+    (document.body || document.documentElement).appendChild(bar);
+
+    var go = document.getElementById('tgpan-pair-go');
+    if (go) go.onclick = function () { window.open('/api/auth/ws', '_blank'); };
+    var x = document.getElementById('tgpan-pair-x');
+    if (x) x.onclick = function () { if (bar.parentNode) bar.parentNode.removeChild(bar); };
+
+    // 关键：仍然标记为 ok，让主界面的导航/按钮全部可用
+    try { document.documentElement.setAttribute('data-tgpan-gate', 'ok'); } catch (e) {}
   }
 
   // 对外域名：输入管理密码
@@ -186,7 +216,7 @@
       + '<div class="tgpan-gate-field"><label>管理密码</label>'
       + '<input type="password" id="tgpan-gate-pwd" placeholder="请输入管理密码" autocomplete="current-password"></div>'
       + '<button class="tgpan-gate-btn" id="tgpan-gate-go">进入</button>'
-      + '<div class="tgpan-gate-msg" id="tgpan-gate-msg">' + (msg || '') + '</div>'
+      + '<div class="tgpan-gate-msg" id="tgpan-gate-msg">' + escHtml(msg || '') + '</div>'
       + '<div class="tgpan-gate-tip"><b>提示</b> · 在飞牛 OS 里打开 TGPan 可以免密码直接进。'
       + '这个密码在外网域名上才需要输。</div>'
     );
@@ -222,6 +252,13 @@
       removeOverlay();
       // 通知其他 TGPan 脚本：已登录，可以显示控制台
       try {
+        // 除了发事件，还在 window 上留一个标记。
+        //
+        // 原因：万一闸门这一次 fetch 命中了缓存、快得离谱，事件可能在
+        // app.js 注册监听器**之前**就 dispatch 了 —— 那一发就白发了，
+        // 主界面会一直等在「等闸门放行」的空状态里。留个标记，后加载的
+        // 脚本可以先查一眼，不用赌事件有没有错过。
+        window.__tgpanGateOk = true;
         window.dispatchEvent(new CustomEvent('tgpan:gate-ok', { detail: st }));
         document.documentElement.setAttribute('data-tgpan-gate', 'ok');
       } catch (e) {}

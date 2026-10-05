@@ -224,6 +224,9 @@ type extendedService struct {
 
 	// scanOnce/scanTicker 保证自动扫描器只启动一次
 	scanOnce sync.Once
+
+	// dialogOnce 保证「已关注频道」同步器只启动一次
+	dialogOnce sync.Once
 }
 
 func NewExtendedService(api *apiService) *extendedService {
@@ -307,6 +310,16 @@ func (m *extendedMiddleware) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// ---- 频道自动扫描管理 ----
+	// 已关注频道列表（扫描页的频道来源）。
+	// 必须放在 /scan/channels 前缀判断**之前** —— 否则会被下面
+	// HasPrefix("/scan/channels/") 那条吞掉，parts[0] 变成 "dialogs"，
+	// 走成「操作频道 dialogs」然后 404。
+	if r.Method == http.MethodGet &&
+		(r.URL.Path == "/scan/dialogs" || r.URL.Path == "/api/scan/dialogs") {
+		m.srv.DialogsListHTTP(w, r)
+		return
+	}
+
 	if r.URL.Path == "/scan/channels" || r.URL.Path == "/api/scan/channels" {
 		switch r.Method {
 		case http.MethodGet:
@@ -463,5 +476,8 @@ var (
 func StartScanSchedulerFor(mw any) {
 	if m, ok := mw.(*extendedMiddleware); ok && m != nil && m.srv != nil {
 		m.srv.StartScanScheduler()
+		// 顺带启动「已关注频道」同步器：扫描页的频道列表靠它刷新。
+		// 两个调度器互相独立：一个挂了不影响另一个。
+		m.srv.StartDialogScheduler()
 	}
 }

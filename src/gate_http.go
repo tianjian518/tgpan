@@ -56,27 +56,46 @@ func gatePairPath(p string) bool {
 
 // gateExemptRequest 判断整个请求是否豁免闸门拦截。
 //
-// 除路径豁免外，还要放行 WebDAV 的能力探测：
-// 播放器（网易爆米花 / Infuse / VidHub / WinSCP）挂载前会先发一个
-// **不带任何凭据**的 OPTIONS，靠响应里的 DAV 头判断"对面是不是 WebDAV 服务器"。
+// 除路径豁免外，还要放行 WebDAV 的**文件访问**请求。
 //
-// 如果这个探测被闸门拦成 401（且没有 DAV 头），客户端会直接判定
-// "这不是 WebDAV 服务器"→ 挂载失败，连密码框都不弹。
+// 为什么是整体而不是只放行 OPTIONS：
+//   WebDAV 有自己的认证体系（HTTP Basic，凭据存 webdav_credentials 表，
+//   bcrypt 哈希）。播放器挂载后会立刻发 PROPFIND 列举目录，这个请求
+//   带的是 Basic 凭据而不是闸门 cookie。如果被闸门拦成 401，
+//   客户端只会认为"密码错了"，而不是"该去浏览器输管理密码"，
+//   表现就是挂载死活连不上。
 //
-// 只放行 OPTIONS：它会走到 WebDAV 处理器，那里对所有方法都先挂能力头，
-// 再自己做 HTTP Basic 认证，所以放行不会泄露任何文件内容。
+//   放行整条 WebDAV 路径不会降低安全性：真正校验身份的是
+//   webdav.go 里的 r.BasicAuth()，没凭据一样返回 401
+//   （带 WWW-Authenticate，正好是客户端要的）。
+//
+// 注意这里**不能**把 /webdav/credentials 也算进豁免。
+// 那是给网页界面用的凭据管理接口，走的是闸门 cookie 认证，
+// 必须经过下面的闸门块 —— 否则拿不到合成凭证，必然 401。
 func gateExemptRequest(r *http.Request) bool {
 	if gateExemptPath(r.URL.Path) {
 		return true
 	}
-	if r.Method == http.MethodOptions && strings.HasPrefix(r.URL.Path, webdavPrefix) {
-		return true
+	p := strings.TrimPrefix(r.URL.Path, "/api")
+	if isWebDAVCredentialPath(p) {
+		return false
 	}
-	// /api/webdav 前缀同理（部分客户端会带 /api）
-	if r.Method == http.MethodOptions && strings.HasPrefix(r.URL.Path, "/api/webdav") {
+	// WebDAV 全程放行，由 webdav.go 自己做 Basic 认证
+	if strings.HasPrefix(p, webdavPrefix) {
 		return true
 	}
 	return false
+}
+
+// isWebDAVCredentialPath 判断是否是「WebDAV 凭据管理」接口。
+//
+// 这类接口虽然长在 /webdav 前缀下，但它们的身份校验走的是闸门 cookie
+// （网页里点"生成账号"），跟 WebDAV 文件访问的 Basic 认证是两套东西。
+// 必须在豁免判断里把它们区分出来，否则会被当成 WebDAV 文件请求放行，
+// 结果拿不到合成凭证 → 一律 401。
+func isWebDAVCredentialPath(p string) bool {
+	return p == "/webdav/credentials" ||
+		strings.HasPrefix(p, "/webdav/credentials/")
 }
 
 // writeJSONError 统一错误响应格式：{"error": "..."}

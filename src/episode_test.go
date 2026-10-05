@@ -161,3 +161,73 @@ func TestExtractCaptionLine(t *testing.T) {
 		}
 	}
 }
+
+// ===========================================================================
+//  影视分类测试
+// ===========================================================================
+
+func TestClassifyMedia(t *testing.T) {
+	cases := []struct {
+		name     string
+		fname    string
+		caption  string
+		isSeries bool
+		want     MediaKind
+	}{
+		// 认出集数 → 电视剧（最高优先级，除非是动漫）
+		{"剧集识别成功", "狂飙 S01E05.mp4", "", true, KindTV},
+		{"剧集识别成功-无副标题", "狂飙 第05集.mp4", "", true, KindTV},
+
+		// 动漫优先于电视剧
+		//   注意：光看「火影忍者 S01E01」是认不出动漫的——文件名里没有动漫
+		//   关键词，我们宁可判成电视剧也不瞎猜。动漫要靠配文/标题里的关键词。
+		{"动漫靠配文", "火影忍者 S01E01.mp4", "#动漫 #火影", true, KindAnime},
+		{"动漫关键词", "咒术回战 动漫.mp4", "", false, KindAnime},
+		{"番剧关键词", "间谍过家家 番剧 S02E01.mp4", "", true, KindAnime},
+		{"动画英文", "Spy x Family anime S01E01.mkv", "", true, KindAnime},
+		{"剧场版", "名侦探柯南 剧场版 万圣节的新娘.mp4", "", false, KindAnime},
+
+		// 电影特征词
+		{"电影关键词", "流浪地球2 电影.mp4", "", false, KindMovie},
+		{"蓝光", "复仇者联盟4 蓝光原盘.mkv", "", false, KindMovie},
+		{"年份+分辨率", "Dune.2021.2160p.BluRay.x265.mkv", "", false, KindMovie},
+		{"WEB-DL", "The.Matrix.1999.WEB-DL.1080p.mkv", "", false, KindMovie},
+		{"枪版", "某某大片 枪版.mp4", "", false, KindMovie},
+
+		// 电视剧特征词
+		{"全集", "琅琊榜 全集.mp4", "", false, KindTV},
+		{"完结", "某某剧 完结.mkv", "", false, KindTV},
+		{"更新至", "某某剧 更新至20集.mkv", "", false, KindTV},
+		{"第二季", "某某剧 第二季.mp4", "", false, KindTV},
+
+		// 中文片名、无集数季数标记 → 倾向电影
+		{"纯中文片名", "肖申克的救赎.mp4", "", false, KindMovie},
+		{"纯中文片名2", "霸王别姬.mkv", "", false, KindMovie},
+
+		// 含「集」或「季」的认不出的 → 其他（不瞎猜成电影）
+		{"有集字但没认出", "某某节目 精彩片段集锦.mp4", "", false, KindOther},
+	}
+
+	for _, c := range cases {
+		got := ClassifyMedia(c.fname, c.caption, c.isSeries)
+		if got != c.want {
+			t.Errorf("%s: ClassifyMedia(%q, %q, %v) = %q, want %q",
+				c.name, c.fname, c.caption, c.isSeries, got, c.want)
+		}
+	}
+}
+
+func TestKindFolderName(t *testing.T) {
+	if KindFolderName(KindMovie) != "电影" {
+		t.Error("movie folder name wrong")
+	}
+	if KindFolderName(KindTV) != "电视剧" {
+		t.Error("tv folder name wrong")
+	}
+	if KindFolderName(KindAnime) != "动漫" {
+		t.Error("anime folder name wrong")
+	}
+	if KindFolderName(KindOther) != "" {
+		t.Error("other should have no folder")
+	}
+}

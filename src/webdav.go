@@ -291,8 +291,15 @@ func (h *webdavHandler) parsePath(raw string) (string, error) {
 	if raw == "" {
 		return "", nil
 	}
-	// 去掉 WebDAV 前缀
+	// 去掉 WebDAV 前缀。
+	//
+	// 两种入口都要认：
+	//   /webdav/...       播放器直连
+	//   /api/webdav/...   客户端自动加的 /api 前缀
+	// 后者如果不先剥掉 /api，剩下的 "api/webdav/..." 会被当成
+	// 一个名叫 api 的目录去查，必然 404。
 	p := raw
+	p = strings.TrimPrefix(p, "/api")
 	if strings.HasPrefix(p, webdavPrefix) {
 		p = p[len(webdavPrefix):]
 	}
@@ -779,6 +786,29 @@ func (e *extendedService) verifyCookieUser(r *http.Request) (*types.JWTClaims, e
 		return nil, err
 	}
 	return auth.VerifyUser(r.Context(), e.api.db, e.api.cache, e.api.cnf.JWT.Secret, cookie.Value)
+}
+
+// verifyCookieUserCtx 和 verifyCookieUser 一样验身份，但**额外**把 claims
+// 注入返回的 request 的 context。
+//
+// 为什么需要它（这是个踩过的坑）：
+//
+//	verifyCookieUser 只返回 claims，**不碰 context**。而 apiService 里
+//	几乎所有方法都是 `userId := auth.GetUser(ctx)` 这种写法 —— 它们从
+//	context 里取用户。于是「HTTP handler → apiService 方法」这条链路会
+//	拿到 userId == 0，方法直接返回 401。
+//
+//	表现：接口明明验过身份了，却一直回 401 unauthorized，看日志毫无线索。
+//
+// 所以走 apiService 的 handler 必须用这个版本。只用 claims 就够的
+// （比如自己 strconv.ParseInt(claims.Subject) 拿 userId 的）继续用老的就行，
+// 不必改 —— 保持既有调用点零风险。
+func (e *extendedService) verifyCookieUserCtx(r *http.Request) (*http.Request, *types.JWTClaims, error) {
+	claims, err := e.verifyCookieUser(r)
+	if err != nil {
+		return r, nil, err
+	}
+	return r.WithContext(auth.WithUser(r.Context(), claims)), claims, nil
 }
 
 // ensureUniqueUsername 保证用户名不重复。

@@ -3,6 +3,7 @@ package services
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"path"
@@ -73,8 +74,12 @@ type ScanResult struct {
 	// EpisodeMatched 其中被识别为剧集、并归入剧名子文件夹的文件数
 	EpisodeMatched int `json:"episodeMatched"`
 	// SeriesFolders 本次用到的剧名子文件夹数量
-	SeriesFolders int    `json:"seriesFolders"`
-	Message       string `json:"message"`
+	SeriesFolders int `json:"seriesFolders"`
+	// MovieCount / TVCount / AnimeCount 按分类归档的文件数
+	MovieCount int    `json:"movieCount"`
+	TVCount    int    `json:"tvCount"`
+	AnimeCount int    `json:"animeCount"`
+	Message    string `json:"message"`
 }
 
 // normalizeChannelId 兼容 -100 前缀和裸 ID，统一返回裸 ID
@@ -172,6 +177,8 @@ func (a *apiService) FilesScanChannel(ctx context.Context, req ScanRequest) (*Sc
 	var nonSeries []models.File
 	// epTags[i] 对应 collected[i] 的剧集识别结果
 	var epTags []EpisodeInfo
+	// mediaKinds[i] 对应 collected[i] 的影视分类（电影/电视剧/动漫/其他）
+	var mediaKinds []MediaKind
 
 	err = client.Run(ctx, func(ctx context.Context) error {
 		tgAPI := client.API()
@@ -346,6 +353,9 @@ func (a *apiService) FilesScanChannel(ctx context.Context, req ScanRequest) (*Sc
 				})
 				// 按顺序记下每个文件对应的剧集信息，下标与 collected 一一对应
 				epTags = append(epTags, ep)
+				// 同时记下影视分类（电影 / 电视剧 / 动漫 / 其他），
+				// 归档时按这个值挂到「电影」「电视剧」「动漫」子文件夹下
+				mediaKinds = append(mediaKinds, ClassifyMedia(fileName, caption, er.Ok))
 			}
 
 			// 用「本次实际拿到多少条」判断是否还有下一页，
@@ -390,13 +400,43 @@ func (a *apiService) FilesScanChannel(ctx context.Context, req ScanRequest) (*Sc
 		result.FolderId = folder.ID
 		result.FolderName = folder.Name
 
-		// 4.1 建剧名子文件夹
+		// 4.1 建分类子文件夹（电影 / 电视剧 / 动漫）
+		//
+		//   目录结构：
+		//     频道文件夹/
+		//       电影/         ← 单部电影
+		//       电视剧/        ← 认不出具体剧名，或只有零散集数
+		//       动漫/         ← 含动漫关键词的
+		//       <剧名>/        ← 认出了剧名的整季，仍按剧名单独一个文件夹
+		//       其余文件平铺在频道文件夹下
+		//
+		//   为什么要分类：用户明确要求"至少看清楚是什么电影、什么电视剧"，
+		//   这样挂到网易爆米花才能被正确识别成电影库 / 剧集库。
+		//
+		//   文件夹按名字去重复用（ensureFolder 内部先查后建），
+		//   所以多次扫描不会重复建。
+		kindFolders := map[MediaKind]string{}
+		needKinds := map[MediaKind]bool{}
+		for _, k := range mediaKinds {
+			if k != KindOther && KindFolderName(k) != "" {
+				needKinds[k] = true
+			}
+		}
+		for k := range needKinds {
+			kf, err := a.ensureFolder(ctx, userId, KindFolderName(k), folder.ID)
+			if err != nil {
+				return fmt.Errorf("创建分类文件夹「%s」失败: %w", KindFolderName(k), err)
+			}
+			kindFolders[k] = kf.ID
+		}
+
+		// 4.2 建剧名子文件夹
 		//
 		//   「狂飙 S01E01.mp4」「狂飙 S01E02.mp4」... 全部收进
-		//   频道文件夹/狂飙/ 底下，电影和认不出来的照旧平铺在频道文件夹下。
+		//   频道文件夹/电视剧/狂飙/ 底下。
 		//
-		//   文件夹按剧名去重复用（ensureFolder 内部先查后建），所以同一部剧
-		//   无论分几次扫到，都只会有一个文件夹。
+		//   挂在分类文件夹之下（而不是直接挂频道文件夹根），这样
+		//   「电影」「电视剧」「动漫」三个夹子始终是干净的第一层。
 		seriesFolders := map[string]string{} // 剧名 -> 文件夹 ID
 		if len(seriesTitles) > 0 {
 			// 排序后再建，保证多次扫描的创建顺序稳定，日志好看
@@ -406,8 +446,20 @@ func (a *apiService) FilesScanChannel(ctx context.Context, req ScanRequest) (*Sc
 			}
 			sort.Strings(names)
 
+			// 剧名文件夹的父级：优先挂到该剧所属分类下
 			for _, t := range names {
-				sf, err := a.ensureFolder(ctx, userId, sanitizeName(t), folder.ID)
+				parentID := folder.ID
+				// 找到这部剧的分类
+				for i := range collected {
+					if i < len(epTags) && epTags[i].Ok && epTags[i].Title == t &&
+						i < len(mediaKinds) {
+						if kid, ok := kindFolders[mediaKinds[i]]; ok && kid != "" {
+							parentID = kid
+						}
+						break
+					}
+				}
+				sf, err := a.ensureFolder(ctx, userId, sanitizeName(t), parentID)
 				if err != nil {
 					return fmt.Errorf("创建剧集文件夹「%s」失败: %w", t, err)
 				}
@@ -419,19 +471,39 @@ func (a *apiService) FilesScanChannel(ctx context.Context, req ScanRequest) (*Sc
 		if len(collected) > 0 {
 			var totalSize int64
 			for i := range collected {
-				// 认出了剧集的挂到剧名子文件夹下，其余平铺在频道文件夹下
+				kind := KindOther
+				if i < len(mediaKinds) {
+					kind = mediaKinds[i]
+				}
+
+				// 挂载优先级：剧名文件夹 > 分类文件夹 > 频道文件夹根
 				if i < len(epTags) && epTags[i].Ok {
 					if fid, ok := seriesFolders[epTags[i].Title]; ok && fid != "" {
 						collected[i].ParentId = &fid
+					} else if kid, ok := kindFolders[kind]; ok && kid != "" {
+						collected[i].ParentId = &kid
 					} else {
 						collected[i].ParentId = &folder.ID
 					}
+				} else if kid, ok := kindFolders[kind]; ok && kid != "" {
+					collected[i].ParentId = &kid
 				} else {
 					collected[i].ParentId = &folder.ID
 				}
+
 				c := string(category.GetCategory(collected[i].Name))
 				collected[i].Category = &c
 				totalSize += *collected[i].Size
+
+				// 统计各类数量，回给前端展示
+				switch kind {
+				case KindMovie:
+					result.MovieCount++
+				case KindTV:
+					result.TVCount++
+				case KindAnime:
+					result.AnimeCount++
+				}
 			}
 
 			if err := a.db.CreateInBatches(&collected, 200).Error; err != nil {
@@ -461,6 +533,54 @@ func (a *apiService) FilesScanChannel(ctx context.Context, req ScanRequest) (*Sc
 		result.Message = fmt.Sprintf("扫描了 %d 条消息，新导入 %d 个视频，共 %s", result.Scanned, result.Imported, humanSize(result.TotalSize))
 	}
 	return result, nil
+}
+
+// RescanChannel 对**已登记过**的频道做一次增量扫描。
+//
+// 这是给「立即扫一次」按钮用的，和 FilesScanChannel 的区别：
+//
+//	FilesScanChannel  扫描页用，用户手填频道 ID，可能从未扫过，
+//	                  会把游标、文件夹绑定、分类/剧集文件夹全部重建一遍。
+//	RescanChannel     自动扫描列表用，频道一定已经扫过一次了 ——
+//	                  文件夹绑定、游标都在库里，界面上也有。
+//
+// 为什么必须分开：如果复用 FilesScanChannel 且不带 incremental，
+// 每次点「立即扫一次」都会把整个频道从头翻一遍。大频道几百上千条消息，
+// 既慢又极易触发 TG 的 FLOOD_WAIT（严重会封号），而且一条新文件都导不进来。
+// 这里强制走增量路径，只拉游标之后的新消息。
+func (a *apiService) RescanChannel(ctx context.Context, channelIdRaw int64, limit int) (*ScanResult, error) {
+	userId := auth.GetUser(ctx)
+	if userId == 0 {
+		return nil, &apiError{err: fmt.Errorf("unauthorized"), code: 401}
+	}
+
+	channelId := normalizeChannelId(channelIdRaw)
+	if channelId == 0 {
+		return nil, &apiError{err: fmt.Errorf("channelId 不能为空"), code: 400}
+	}
+	if limit <= 0 {
+		limit = 500
+	}
+
+	// 必须已登记。没登记的走扫描页那条路，不能在自动扫描列表里裸扫 ——
+	// 否则会凭空建出一堆游离的文件夹。
+	var st models.ChannelScan
+	if err := a.db.Where("channel_id = ? AND user_id = ?", channelId, userId).
+		First(&st).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, &apiError{err: fmt.Errorf("该频道未登记自动扫描"), code: 404}
+		}
+		return nil, &apiError{err: err}
+	}
+
+	// 强制增量。注意 req.Incremental 传 true 时，FilesScanChannel 内部
+	// 会在"游标为 0（从没扫过）"的极端情况下自动退化为全量，
+	// 所以这里不用担心第一次跑会漏。
+	return a.FilesScanChannel(ctx, ScanRequest{
+		ChannelId:   channelId,
+		Incremental: true,
+		Limit:       limit,
+	})
 }
 
 func folderName(req ScanRequest, title string) string {
