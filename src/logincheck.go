@@ -129,7 +129,7 @@ func (e *extendedService) runLoginProbe(ctx context.Context, phone string) []log
 	}
 	if sendErr == nil && codeHash != "" {
 		out = append(out, loginStep{"取得 phoneCodeHash", true,
-			"正常（长度 "+fmt.Sprint(len(codeHash))+"）—— 前端可用于提交验证码", "-"})
+			"正常（长度 " + fmt.Sprint(len(codeHash)) + "）—— 前端可用于提交验证码", "-"})
 	}
 
 	return out

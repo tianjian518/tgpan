@@ -149,3 +149,11 @@ func maskPhone(p string) string {
 	}
 	return "***" + p[len(p)-4:]
 }
+
+// shortHash 只显示 hash 前 6 位，避免日志过长
+func shortHash(h string) string {
+	if len(h) <= 6 {
+		return h
+	}
+	return h[:6] + "..."
+}

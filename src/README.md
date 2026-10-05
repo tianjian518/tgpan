@@ -159,13 +159,18 @@ INFO [APP] db.tuning.verify   synchronous_commit=off work_mem=16MB jit=off
 |---|---|
 | `channelscan.go` | `pkg/services/channelscan.go` |
 | `dialogs.go` | `pkg/services/dialogs.go` |
+| `file.go` / `authlog.go` / `diag.go` / `logincheck.go` | `pkg/services/` 下同名文件 |
 | `models_webdav.go` | `pkg/models/webdav.go` |
 | `internal_auth.go` | `internal/auth/auth.go` |
 | `internal_reader_tg_reader.go` | `internal/reader/tg_reader.go` |
 | `internal_database_tuning.go` | `internal/database/tuning.go` |
+| `tgc.go` | `internal/tgc/tgc.go` |
 | `20261005090000_tg_dialogs.sql` | `internal/database/migrations/20261005090000_tg_dialogs.sql` |
 
-带 `.patch.txt` / `.txt` 后缀的是**对照说明文件**，只供阅读，不参与编译。
+> **这里的每一个文件都是真实源码**，按上表映射回上游路径即可直接编译。
+> 目录里**不含**任何仅供阅读的中间产物 —— 早先版本曾把 `file.go`、`authlog.go`
+> 等文件错命名为 `*.go.txt`，导致使用者误以为它们不用替换、或拿到的是旧版。
+> 已全部更正。
 
 ---
 
@@ -185,19 +190,45 @@ go run github.com/ogen-go/ogen/cmd/ogen --clean --package api --target internal/
 curl -sL -o ui.zip "https://ghfast.top/https://github.com/tgdrive/teldrive-ui/releases/download/latest/teldrive-ui.zip"
 mkdir -p ui/dist && unzip -q ui.zip -d ui/dist
 
-# 4. 应用本项目的改造（文件名按上表还原到上游目录）
-cp <本项目>/src/channelscan.go            pkg/services/channelscan.go
-cp <本项目>/src/channelscan_http.go       pkg/services/channelscan_http.go
-cp <本项目>/src/dialogs.go                pkg/services/dialogs.go
-cp <本项目>/src/scan_scheduler.go         pkg/services/scan_scheduler.go
-cp <本项目>/src/models_webdav.go          pkg/models/webdav.go
-cp <本项目>/src/internal_reader_tg_reader.go internal/reader/tg_reader.go
-cp <本项目>/src/internal_reader_reader.go    internal/reader/reader.go
-cp <本项目>/src/internal_database_tuning.go  internal/database/tuning.go
-cp <本项目>/src/internal_database_database.go internal/database/database.go
-cp <本项目>/src/20261005090000_tg_dialogs.sql \
-   internal/database/migrations/20261005090000_tg_dialogs.sql
-#   …api.go / config.go / run.go / auth.go 等按对照文件手动打补丁
+# 4. 把 src/ 的文件按上表还原到上游目录（全部都要替换，没有例外）
+S=<本项目>/src
+cp $S/api.go                      pkg/services/api.go
+cp $S/services_auth.go            pkg/services/auth.go
+cp $S/authlog.go                  pkg/services/authlog.go
+cp $S/channelscan.go              pkg/services/channelscan.go
+cp $S/channelscan_http.go         pkg/services/channelscan_http.go
+cp $S/diag.go                     pkg/services/diag.go
+cp $S/dialogs.go                  pkg/services/dialogs.go
+cp $S/episode.go                  pkg/services/episode.go
+cp $S/file.go                     pkg/services/file.go
+cp $S/gate.go                     pkg/services/gate.go
+cp $S/gate_http.go                pkg/services/gate_http.go
+cp $S/gate_wire.go                pkg/services/gate_wire.go
+cp $S/logincheck.go               pkg/services/logincheck.go
+cp $S/scan_scheduler.go           pkg/services/scan_scheduler.go
+cp $S/series_http.go              pkg/services/series_http.go
+cp $S/webdav.go                   pkg/services/webdav.go
+cp $S/models_webdav.go            pkg/models/webdav.go
+cp $S/internal_auth.go            internal/auth/auth.go
+cp $S/config.go                   internal/config/config.go
+cp $S/tgc.go                      internal/tgc/tgc.go
+cp $S/run.go                      cmd/run.go
+cp $S/internal_database_database.go      internal/database/database.go
+cp $S/internal_database_tuning.go        internal/database/tuning.go
+cp $S/internal_reader_reader.go          internal/reader/reader.go
+cp $S/internal_reader_tg_reader.go       internal/reader/tg_reader.go
+for m in 20261004080000_webdav_credentials 20261004080100_channel_scans \
+         20261005090000_tg_dialogs; do
+  cp $S/$m.sql internal/database/migrations/$m.sql
+done
+# 测试文件（可选，跑单测用）
+cp $S/gate_test.go                pkg/services/gate_test.go
+cp $S/webdav_test.go              pkg/services/webdav_test.go
+cp $S/dialogs_test.go             pkg/services/dialogs_test.go
+cp $S/episode_test.go             pkg/services/episode_test.go
+cp $S/security_test.go            pkg/services/security_test.go
+cp $S/internal_database_tuning_test.go   internal/database/tuning_test.go
+cp $S/internal_reader_window_test.go     internal/reader/window_test.go
 
 cp <本项目>/ui/app.js  ui/dist/app.js
 cp <本项目>/ui/app.css ui/dist/app.css
