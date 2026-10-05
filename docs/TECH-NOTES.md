@@ -203,15 +203,26 @@ mux.Mount("/api/", http.StripPrefix("/api", extendedSrv))
 
 ## 六、前端改造
 
-Teldrive 官方 UI 是**打包产物**（从 GitHub Release 下载），不重新构建，
-改为**注入一个独立 JS**：
+> **本节已随 v2.6.3 重写。** 早期方案是「保留官方 UI + 注入补丁 JS」
+> （`ui/tgpan-skin.js` / `ui/tgpan-scan.js` / `ui/tgpan-login.js`），
+> 该方案下的选择器会污染原版界面，且官方 UI 升级即失效。
+> **现已整体换成自制前端**，那三个补丁脚本已删除。
 
-- 文件：`ui/tgpan-scan.js`
-- 注入：`ui/index.html` 里加 `<script src="/tgpan-scan.js" defer>`
-- 效果：右下角「📡 扫描 TG 频道」悬浮按钮 → 弹窗填频道 ID → 调接口 → 显示结果
+当前结构 —— 三个文件，都是第一方代码：
 
-> ⚠️ UI 是 **embed 进 Go 二进制**的（`//go:embed all:dist`），
-> 改了 `ui/dist/` 后必须**重新编译二进制**，光重打镜像没用。
+| 文件 | 职责 |
+|---|---|
+| `ui/index.html` | 骨架，按顺序引 `app.css` / `tgpan-gate.js` / `app.js` |
+| `ui/app.css` | 全部样式 |
+| `ui/app.js` | 主界面：我的网盘 + 系统设置（六个面板） |
+| `ui/tgpan-gate.js` | 闸门：设置管理密码 / 登录 / 遮挡层（必须最先跑） |
+
+设置页的六个面板：`drive`（我的网盘）、`scan`（频道扫描）、`auto`（自动扫描）、
+`webdav`、`series`（剧集归档）、`about`。
+
+> ⚠️ UI 是 **embed 进 Go 二进制的**（`//go:embed all:dist`），
+> 改了前端后必须**重新编译二进制**，光重打镜像没用。
+> 源码侧对应 `ui/dist/`（编译副本里），`ui/ui.go` 负责 embed。
 
 ---
 
@@ -239,7 +250,6 @@ exec /usr/local/bin/teldrive: no such file or directory
 | 生成物 | 来源 | 命令 |
 |---|---|---|
 | `internal/api/` | ogen 从 openapi 规范生成 | `go run github.com/ogen-go/ogen/cmd/ogen --clean --package api --target internal/api openapi.json` |
-| `ui/dist/` | GitHub Release 前端包 | `curl -L https://github.com/tgdrive/teldrive-ui/releases/download/latest/teldrive-ui.zip` |
 
 两者都**已固化进本项目**（`vendor/` 里的二进制是编译好的完整产物），
 正常构建**不需要联网**。

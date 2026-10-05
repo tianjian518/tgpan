@@ -5,13 +5,17 @@
 #  内含：
 #    - PostgreSQL 17 + pgroonga 扩展（Teldrive 必需的全文搜索）
 #    - Teldrive 服务端（连 TG、切片存储、文件流、302）
-#    - Teldrive Web UI（官方界面，支持手机号 / 扫码登录）
+#    - TGPan Web 界面（自制前端，已 embed 进二进制，无需额外静态文件兜底）
+#      · 我的网盘 / 频道扫描 / 自动扫描 / WebDAV / 剧集归档 / 关于
+#      · 闸门脚本 tgpan-gate.js（管理密码 + 内网免密）
 #
 #  对外端口：
 #    8080  → Web 界面（看片、管理文件、挂载播放器）
 #
 #  构建：docker build -t tgpan .
 #  运行：docker run -d -p 8080:8080 -v tgpan-data:/data tgpan
+#
+#  支持的平台：linux/amd64、linux/arm64（见 vendor/ 下的两个包）
 # ==========================================================================
 
 ARG PG_IMAGE=groonga/pgroonga:latest-alpine-17
@@ -20,13 +24,20 @@ ARG PG_IMAGE=groonga/pgroonga:latest-alpine-17
 FROM alpine:3.20 AS fetcher
 ARG TARGETARCH
 COPY vendor/ /vendor/
+# 架构映射。这里**显式失败**而不是回退到 amd64：
+# 若某架构没有对应的包，构建期就报错，好过装出一个跑不起来的镜像。
+# （曾经写成 `*) A="amd64"`，结果在 arm 上会 exec format error，且报错指不到根因）
 RUN set -eux; \
-    case "${TARGETARCH}" in \
+    case "${TARGETARCH:-amd64}" in \
       amd64) A="amd64" ;; \
       arm64) A="arm64" ;; \
-      arm)   A="arm" ;; \
-      *)     A="amd64" ;; \
+      *) \
+        echo "不支持的架构：TARGETARCH=${TARGETARCH}" >&2; \
+        echo "vendor/ 下现有：" >&2; ls -1 /vendor/ >&2; \
+        exit 1 ;; \
     esac; \
+    test -f "/vendor/teldrive-${A}.tar.gz" || { \
+      echo "缺少 vendor/teldrive-${A}.tar.gz —— 无法为 $A 构建" >&2; exit 1; }; \
     mkdir -p /out; \
     tar -xzf "/vendor/teldrive-${A}.tar.gz" -C /out; \
     chmod +x /out/teldrive
@@ -34,8 +45,10 @@ RUN set -eux; \
 # ---------- Stage 2: 运行时 ----------
 FROM ${PG_IMAGE}
 
-ARG TELDRIVE_VERSION=1.8.3
-ARG TGPAN_VERSION=dev
+# TGPan 版本号。容器启动横幅会打印它（见 docker/entrypoint.sh）。
+# 默认值与仓库根目录的 VERSION 文件保持一致，构建时可覆盖：
+#   docker build --build-arg TGPAN_VERSION=2.7.0 -t tgpan .
+ARG TGPAN_VERSION=2.7.0
 ENV TGPAN_VERSION=${TGPAN_VERSION}
 
 # 运行所需工具（supervisor 同时管理数据库和 Teldrive）
