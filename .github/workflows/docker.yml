@@ -1,10 +1,18 @@
 name: Build and Push
 
 # 触发条件：
-#   1. 推 tag（如 v1.1.0）—— 自动取 tag 作为版本号
-#   2. 手动触发 —— 界面上填版本号
+#   1. 推 tag（如 v2.7.0）—— 自动取 tag 作为版本号，发布"精确版本"标签
+#   2. 推 main 分支 —— 发布 latest（开发版），版本号从 VERSION 文件读
+#   3. 手动触发 —— 界面上填版本号
+#
+# 为什么要加 main 触发（曾经踩过的坑）：
+#   早先只配了 tag 触发，结果在 main 上推了一堆提交、镜像仓库却纹丝不动，
+#   用户拉到的还是几个月前的旧版。代码推了、镜像没动，两边悄悄脱节。
+#   现在 main 一推就出 latest，不会再出现"推了但没发布"的静默脱节。
 on:
   push:
+    branches:
+      - main
     tags:
       - 'v*'
   workflow_dispatch:
@@ -28,22 +36,33 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # 计算版本号：tag 优先，其次手动输入
+      # 计算版本号，三种来源优先级：tag > 手动输入 > VERSION 文件
+      # 同时算出「要不要发精确版本标签」：
+      #   只有 tag / 手动触发才发 2.7.0、2.7、2 这种精确标签；
+      #   推 main 只发 latest —— 免得 main 上的临时版本号把正式标签覆盖掉。
       - name: Resolve version
         id: ver
         run: |
-          if [ "${{ github.event_name }}" = "push" ]; then
+          if [ "${{ github.event_name }}" = "push" ] && [ "${{ github.ref_type }}" = "tag" ]; then
             V="${GITHUB_REF_NAME#v}"
-          else
+            PINNED=1
+          elif [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
             V="${{ github.event.inputs.version }}"
+            PINNED=1
+          else
+            V="$(tr -d '[:space:]' < VERSION)"
+            PINNED=0
           fi
-          echo "version=$V" >> "$GITHUB_OUTPUT"
+
           MAJOR="${V%%.*}"
           REST="${V#*.}"
           MINOR="${REST%%.*}"
-          echo "major=$MAJOR" >> "$GITHUB_OUTPUT"
-          echo "major_minor=$MAJOR.$MINOR" >> "$GITHUB_OUTPUT"
-          echo ">> 本次构建版本：$V"
+
+          echo "version=$V"                  >> "$GITHUB_OUTPUT"
+          echo "major=$MAJOR"                >> "$GITHUB_OUTPUT"
+          echo "major_minor=$MAJOR.$MINOR"   >> "$GITHUB_OUTPUT"
+          echo "pinned=$PINNED"              >> "$GITHUB_OUTPUT"
+          echo ">> 本次构建版本：$V（$([ "$PINNED" = 1 ] && echo 发布精确标签 || echo 仅发布 latest)）"
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
@@ -58,19 +77,17 @@ jobs:
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
       # 生成标签：
-      #   1.1.0  → 精确版本
-      #   1.1    → 次版本
-      #   1      → 主版本
-      #   latest → 最新
+      #   tag / 手动 → 1.1.0（精确）、1.1（次版本）、1（主版本）、latest
+      #   推 main    → 仅 latest
       - name: Docker metadata
         id: meta
         uses: docker/metadata-action@v5
         with:
           images: ${{ secrets.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}
           tags: |
-            type=raw,value=${{ steps.ver.outputs.version }}
-            type=raw,value=${{ steps.ver.outputs.major_minor }}
-            type=raw,value=${{ steps.ver.outputs.major }}
+            type=raw,value=${{ steps.ver.outputs.version }},enable=${{ steps.ver.outputs.pinned == '1' }}
+            type=raw,value=${{ steps.ver.outputs.major_minor }},enable=${{ steps.ver.outputs.pinned == '1' }}
+            type=raw,value=${{ steps.ver.outputs.major }},enable=${{ steps.ver.outputs.pinned == '1' }}
             type=raw,value=latest
 
       - name: Build and push (amd64 + arm64)
