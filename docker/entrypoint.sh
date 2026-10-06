@@ -35,9 +35,32 @@ fi
 chown -R postgres:postgres "$PGDATA" 2>/dev/null || true
 
 # ---- PostgreSQL 初始化（仅首次）----
-if [ ! -f "$PGDATA/PG_VERSION" ]; then
+#
+# 【为什么不能只看 PG_VERSION 是否存在】
+# initdb 会**先写 PG_VERSION**，再建其它文件。如果它在中途失败
+# （断电、磁盘满、被 kill、慢速设备上超时），目录里会留下一个
+# 「有 PG_VERSION 但没有真实数据库」的残缺目录。下次启动时按
+# 老逻辑就会跳过初始化，直接拿这个坏目录去启动 → 反复崩溃，
+# 且报错信息完全指不到根因。
+#
+# 所以判定「已初始化」要更严格：PG_VERSION 和 global/pg_control 都在，
+# 才算真的建好了。残缺目录一律**移到一边重新建**，绝不原地删（留证据）。
+if [ ! -f "$PGDATA/PG_VERSION" ] || [ ! -f "$PGDATA/global/pg_control" ]; then
+  if [ -d "$PGDATA" ] && [ -n "$(ls -A "$PGDATA" 2>/dev/null)" ]; then
+    BROKEN="$PGDATA.broken.$(date +%Y%m%d%H%M%S)"
+    echo "[init] 检测到残缺的数据目录（initdb 上次没跑完），移到一边：$BROKEN"
+    mv "$PGDATA" "$BROKEN" || true
+  fi
   echo "[init] 首次启动，初始化数据库..."
-  su postgres -c "initdb -D '$PGDATA' -E UTF8 --locale=C" >/dev/null
+  mkdir -p "$PGDATA"
+  chown postgres:postgres "$PGDATA" 2>/dev/null || true
+  # 去掉 stdout 重定向：initdb 的报错必须让用户看见，
+  # 否则失败时只有一个干巴巴的 "初始化失败"，无从排查。
+  if ! su postgres -c "initdb -D '$PGDATA' -E UTF8 --locale=C"; then
+    echo "[error] initdb 失败，详见上面的输出。" >&2
+    echo "        常见原因：/data 所在磁盘空间不足、或该目录无写权限。" >&2
+    exit 1
+  fi
   echo "[init] 数据库初始化完成"
 fi
 
@@ -46,13 +69,37 @@ echo "[init] 检查数据库用户与库..."
 # 先启动一个临时 postgres 用于初始化（supervisord 随后会接管同名端口，故用独立 socket 目录）
 TMP_SOCK="/tmp/pginit"
 mkdir -p "$TMP_SOCK" && chown postgres:postgres "$TMP_SOCK"
-su postgres -c "pg_ctl -D '$PGDATA' -o '-c listen_addresses= -c unix_socket_directories=$TMP_SOCK' -w start" >/dev/null 2>&1 || true
+
+# 【重要】这段临时实例必须**确保收尾关掉**。
+# 以前这里每一步都挂 `|| true` 把失败吞掉，万一 pg_ctl stop 没生效，
+# 临时实例就继续活着。等 supervisord 再去起 postgres 绑 5432 时，
+# 端口已被自己人占住 → 起不来 → 无限重启 → 表现为网页打不开。
+# 现在：启动失败要能看见；收尾用带重试的强制关闭，确认干净。
+if ! su postgres -c "pg_ctl -D '$PGDATA' -o '-c listen_addresses= -c unix_socket_directories=$TMP_SOCK' -w start"; then
+  echo "[error] 临时数据库启动失败，无法完成初始化。" >&2
+  exit 1
+fi
+
 su postgres -c "psql -h '$TMP_SOCK' -tAc \"SELECT 1 FROM pg_roles WHERE rolname='teldrive'\"" | grep -q 1 \
   || su postgres -c "psql -h '$TMP_SOCK' -c \"CREATE ROLE teldrive LOGIN PASSWORD 'secret' SUPERUSER;\"" >/dev/null
-su postgres -c "psql -h '$TMP_SOCK' -tAc \"SELECT 1 FROM pg_database WHERE datname='postgres'\"" >/dev/null 2>&1
 su postgres -c "psql -h '$TMP_SOCK' -c \"ALTER ROLE teldrive WITH LOGIN PASSWORD 'secret' SUPERUSER;\"" >/dev/null
 su postgres -c "psql -h '$TMP_SOCK' -d postgres -c \"CREATE EXTENSION IF NOT EXISTS pgroonga;\"" >/dev/null 2>&1 || true
-su postgres -c "pg_ctl -D '$PGDATA' -m fast -w stop" >/dev/null 2>&1 || true
+
+# 收尾：先 fast 关，若失败再 immediate 强关，最后确认 socket 已消失
+su postgres -c "pg_ctl -D '$PGDATA' -m fast -w stop" >/dev/null 2>&1 \
+  || su postgres -c "pg_ctl -D '$PGDATA' -m immediate -w stop" >/dev/null 2>&1 \
+  || true
+# 再确认一遍真的关干净了（进程还在就报出来，不要假装没事）
+for i in $(seq 1 10); do
+  if ! su postgres -c "pg_ctl -D '$PGDATA' status" >/dev/null 2>&1; then break; fi
+  echo "[init] 等待临时数据库退出... ($i)"
+  sleep 1
+done
+if su postgres -c "pg_ctl -D '$PGDATA' status" >/dev/null 2>&1; then
+  echo "[error] 临时数据库没关掉，supervisord 将无法绑定端口。" >&2
+  exit 1
+fi
+rm -rf "$TMP_SOCK"
 echo "[init] 数据库用户与库就绪"
 
 # ---- 生成 Teldrive 配置（仅首次）----

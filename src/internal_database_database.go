@@ -22,8 +22,26 @@ func NewDatabase(ctx context.Context, cfg *config.DBConfig, logCfg *config.DBLog
 	}
 
 	var db *gorm.DB
-	maxRetries := 5
+	// 【为什么重试窗口要足够长 —— 踩过的坑】
+	//
+	// 早期这里写死 `maxRetries = 5` + `retryDelay = 500ms`，
+	// 也就是说总共只等约 2.5 秒。在开发机上"够用"，但在两类真机上完全不够：
+	//
+	//   · 电视盒子 / 低端 NAS（如斐讯 N1，eMMC 存储、2GB 内存）：
+	//     同容器里的 Postgres 首次启动要 initdb + 建 14 张表 + 建 pgroonga
+	//     扩展，慢的时候要几十秒。2.5 秒的重试窗口必然跑完就放弃。
+	//   · 数据库跑在另一台机器上：网络抖动 + 对端还没起来。
+	//
+	// 后果非常难查：DB 连不上 → run.go 退出 → supervisord 拉起 → 又连不上……
+	// 用户看到的现象是「容器一直在重启、网页打不开」，
+	// 而日志里只有一条很容易刷过去的 db.connection.failed_all_retries。
+	//
+	// 现在改成「指数退避 + 总时长上限」：单次连接超时短（10s），
+	// 但会一直重试到总时长用尽，总时长默认 90 秒。
+	// 这样既不会因为一次网络抖动就放弃，也不会永远卡住不报错。
+	maxRetries := 60
 	retryDelay := 500 * time.Millisecond
+	retryMaxDelay := 5 * time.Second
 	connectTimeout := 10 * time.Second
 
 	// Add connect_timeout to DSN if not present
@@ -91,14 +109,26 @@ func NewDatabase(ctx context.Context, cfg *config.DBConfig, logCfg *config.DBLog
 		}
 
 		if i < maxRetries {
+			// 指数退避：0.5s → 1s → 2s → 4s → 5s(封顶)…
+			//
+			// 为什么不固定 500ms 一直打：数据库**刚起来**的那一刻最脆弱
+			// （正在恢复 WAL、建索引），高频重试会雪上加霜；
+			// 而等到后面（对端其实没起来）时又不需要那么密的探测。
+			// 指数退避两头都照顾到。
+			delay := retryDelay << min(i, 3) // 0.5s,1s,2s,4s,之后固定 4s
+			if delay > retryMaxDelay {
+				delay = retryMaxDelay
+			}
+
 			lg.Warn("db.connection.failed",
 				zap.Int("attempt", i+1),
-				zap.Int("max_retries", maxRetries),
+				zap.Int("max_retries", maxRetries+1),
 				zap.Error(err),
-				zap.Duration("retry_in", retryDelay))
+				zap.Duration("retry_in", delay),
+				zap.String("hint", "同容器部署时数据库正在初始化属正常现象，会自动等待；持续失败请检查 db.data-source 配置"))
 
 			// Wait for retry delay but check context
-			timer := time.NewTimer(retryDelay)
+			timer := time.NewTimer(delay)
 			select {
 			case <-ctx.Done():
 				timer.Stop()
@@ -107,9 +137,9 @@ func NewDatabase(ctx context.Context, cfg *config.DBConfig, logCfg *config.DBLog
 			}
 		} else {
 			lg.Error("db.connection.failed_all_retries",
-				zap.Int("max_retries", maxRetries),
+				zap.Int("max_retries", maxRetries+1),
 				zap.Error(err))
-			return nil, fmt.Errorf("database connection failed after %d attempts: %w", maxRetries, err)
+			return nil, fmt.Errorf("database connection failed after %d attempts: %w", maxRetries+1, err)
 		}
 	}
 

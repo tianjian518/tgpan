@@ -21,13 +21,17 @@ package database
 
 import (
 	"fmt"
+	"math"
+	"os"
+	"strconv"
+	"strings"
 
 	"github.com/tgdrive/teldrive/internal/config"
 	"go.uber.org/zap"
 	"gorm.io/gorm"
 )
 
-// tuneProfile 是我们要施加的调优项。
+// tuneSetting 是我们要施加的一项调优。
 //
 // 每一项都写清楚「为什么」和「代价」，不要加来路不明的魔法参数 ——
 // 调优项一旦没有理由，后面就没人敢删。
@@ -37,9 +41,97 @@ type tuneSetting struct {
 	why   string
 }
 
+// effectiveWorkMemMB 决定 work_mem 用多少 MB。
+//
+// 规则（按优先级）：
+//  1. 配置里显式写了 > 0 的值 —— 完全听配置的（用户知道自己在干什么）
+//  2. 自动探测当前可用的内存上限，按档位选一个**保守**值：
+//     内存很紧的机器（≤1GB，常见于电视盒子）→ 4MB（也就是 Postgres 默认）
+//     中小内存（≤2GB）                       → 8MB
+//     2GB 以上                                → 16MB
+//  3. 探测不到（cgroup/容器限制读不到）→ 退回 8MB 这种中间值，不激进
+//
+// 为什么要探测而不是写死：项目要跑在从 2GB 电视盒子到几十 GB 的服务器上，
+// 同一个值在两头都是错的。小机器上 16MB 会吃紧，大机器上 4MB 又慢。
+func effectiveWorkMemMB(configured int) int {
+	limitMB, ok := detectMemoryLimitMB()
+	return pickWorkMemMB(configured, limitMB, ok)
+}
+
+// pickWorkMemMB 是 effectiveWorkMemMB 的纯逻辑部分，单独拆出来是为了能测。
+//
+// 把「探测」和「决策」分开，测试就不用去伪造 cgroup 文件、
+// 也不用依赖跑测试那台机器的内存是多少 —— 结果在任何机器上都一样。
+func pickWorkMemMB(configured, limitMB int, detected bool) int {
+	if configured > 0 {
+		return configured
+	}
+	if !detected {
+		// 探测不到就用中间值，宁可慢一点也不要冒内存风险
+		return 8
+	}
+	switch {
+	case limitMB <= 1024:
+		return 4
+	case limitMB <= 2048:
+		return 8
+	default:
+		return 16
+	}
+}
+
+// detectMemoryLimitMB 尽力探测「本进程可用内存」上限（单位 MB）。
+//
+// 顺序：
+//  1. cgroup v2: /sys/fs/cgroup/memory.max
+//  2. cgroup v1: /sys/fs/cgroup/memory/memory.limit_in_bytes
+//  3. 宿主机的 /proc/meminfo MemTotal
+//
+// 容器里必须优先看 cgroup —— 因为 /proc/meminfo 显示的是**宿主机**内存，
+// 容器被限到 512MB 时它可能显示 32GB，照它调参就会出事。
+func detectMemoryLimitMB() (int, bool) {
+	// cgroup v2
+	if v, err := os.ReadFile("/sys/fs/cgroup/memory.max"); err == nil {
+		s := strings.TrimSpace(string(v))
+		if s != "" && s != "max" {
+			if n, err := strconv.ParseInt(s, 10, 64); err == nil && n > 0 {
+				return int(n / 1024 / 1024), true
+			}
+		}
+	}
+
+	// cgroup v1
+	if v, err := os.ReadFile("/sys/fs/cgroup/memory/memory.limit_in_bytes"); err == nil {
+		s := strings.TrimSpace(string(v))
+		if n, err := strconv.ParseInt(s, 10, 64); err == nil && n > 0 {
+			// v1 在「未限制」时会给一个极大的数（接近 int64 上限的页对齐值），
+			// 这种要当成"没限制"，继续往下走看 meminfo。
+			const unrealistic = int64(math.MaxInt64) / 2
+			if n < unrealistic {
+				return int(n / 1024 / 1024), true
+			}
+		}
+	}
+
+	// 宿主机 /proc/meminfo
+	if v, err := os.ReadFile("/proc/meminfo"); err == nil {
+		for _, line := range strings.Split(string(v), "\n") {
+			if strings.HasPrefix(line, "MemTotal:") {
+				fields := strings.Fields(line)
+				if len(fields) >= 2 {
+					if kb, err := strconv.ParseInt(fields[1], 10, 64); err == nil && kb > 0 {
+						return int(kb / 1024), true
+					}
+				}
+			}
+		}
+	}
+
+	return 0, false
+}
+
 // buildTuneProfile 根据配置构造调优语句。
-func buildTuneProfile(cfg *config.DBConfig) []tuneSetting {
-	var out []tuneSetting
+func buildTuneProfile(cfg *config.DBConfig) []tuneSetting {	var out []tuneSetting
 
 	// 1. 写入不用等 WAL 落盘。
 	//
@@ -66,13 +158,19 @@ func buildTuneProfile(cfg *config.DBConfig) []tuneSetting {
 	// 实测慢十几倍。
 	//
 	// 代价：work_mem 是**按查询节点**分配的（一个复杂查询有多个排序节点
-	// 就分配多份），不是进程全局。自用实例并发连接数很低，
-	// 16MB × 几个连接 = 几十 MB，可以忽略。
-	if cfg.TuneWorkMemMB > 0 {
+	// 就分配多份），不是进程全局。所以要按机器内存来定，**不能写死**。
+	//
+	// 【为什么必须自适应 —— 踩过的坑】
+	// 早期版本把 16MB 写死成默认值，在小内存设备（如 2GB 的盒子）上
+	// 反而成了负担：好几个排序节点 × 16MB × 并发连接，叠起来很可观。
+	// 高配机上无所谓，小机器上就会把内存吃紧甚至触发 OOM。
+	// 现在按「容器可用内存」分档，拿不到信息时才退回保守值。
+	mem := effectiveWorkMemMB(cfg.TuneWorkMemMB)
+	if mem > 0 {
 		out = append(out, tuneSetting{
 			key:   "work_mem",
-			value: fmt.Sprintf("%dMB", cfg.TuneWorkMemMB),
-			why:   "目录排序/分类聚合不落盘做外部排序",
+			value: fmt.Sprintf("%dMB", mem),
+			why:   fmt.Sprintf("目录排序/分类聚合不落盘做外部排序（按可用内存自动选 %dMB）", mem),
 		})
 	}
 

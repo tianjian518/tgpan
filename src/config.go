@@ -189,17 +189,25 @@ type DBConfig struct {
 	//
 	//   2. work_mem 默认 4MB，而 TGPan 有几个排序/聚合查询
 	//      （目录列表排序、按分类统计）会超，一超就落盘做外部排序，
-	//      慢十几倍。调到 16MB 基本都能在内存里做完。
+	//      慢十几倍。适当调大能让它在内存里做完。
 	//
 	// 代价：内存占用略增（work_mem 是按查询节点分配，不是全局）。
-	// 自用实例几个连接同时跑，多占几十 MB，可以忽略。
+	//
+	// 【重要】work_mem 的大小**按机器内存自动决定**，不要写死：
+	// 本项目要跑在 2GB 电视盒子到几十 GB 的服务器上，
+	// 同一个值在小机器上偏大、在大机器上偏小。
+	// 自动档位：≤1GB→4MB、≤2GB→8MB、>2GB→16MB。
+	// 读取不到内存信息时退回 8MB（保守）。
 	//
 	// 设成 false 可完全关掉，回到 Postgres 默认行为 ——
 	// 如果你把数据库放在共享实例上，或者特别在意断电不丢数据，就关掉。
 	Tune bool `default:"true" description:"Apply connection-level Postgres performance tuning"`
 
 	// TuneWorkMemMB work_mem 的大小（MB）。仅在 Tune=true 时生效。
-	TuneWorkMemMB int `default:"16" description:"work_mem in MB for tuning (0 = leave default)"`
+	//
+	// 0（默认）= 按机器可用内存自动选（推荐，别乱改）。
+	// >0        = 强制使用该值，自动探测被跳过。
+	TuneWorkMemMB int `default:"0" description:"work_mem in MB (0 = auto-detect by available memory)"`
 }
 
 type CronJobConfig struct {

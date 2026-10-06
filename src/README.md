@@ -65,6 +65,7 @@
 | `internal_reader_reader.go` | 清掉不再使用的 `concurrency` 字段 |
 | `internal_reader_window_test.go` | **新增**。6 个单测（数据正确性） |
 | `internal_reader_timing_test.go` | **新增**。5 个时序单测（首字节 / seek / 吞吐曲线） |
+| `run_port_test.go`（`cmd/run_port_test.go`） | **新增**。3 个单测，钉住"端口占用必须报错"（见 §六） |
 | `config.go` | 新增 `stream.prefetch-windows`（默认 **3**）、`stream.first-window-chunks` |
 
 **为什么是"滑动窗口"而不是"加大并发"**：
@@ -144,10 +145,10 @@ func (r *tgMultiReader) windowConcurrency() int {
 ### 四、数据库连接级调优（v2.7.0 新增）
 | 文件 | 改动 |
 |---|---|
-| `internal_database_tuning.go` | **新增**。构建调优参数并**写进 DSN** |
-| `internal_database_tuning_test.go` | **新增**。8 个单测 |
+| `internal_database_tuning.go` | **新增**。构建调优参数并**写进 DSN**；work_mem 按可用内存自适应 |
+| `internal_database_tuning_test.go` | **新增**。10 个单测（含 work_mem 分档的 7 个子用例） |
 | `internal_database_database.go` | DSN 拼接后调 `applyTuning`，`gorm.Open` 后调 `reportTuning` |
-| `config.go` | 新增 `db.tune`、`db.tune-work-mem-mb` |
+| `config.go` | 新增 `db.tune`、`db.tune-work-mem-mb`（默认 **0 = 自动探测**） |
 
 **关键点（容易踩）**：`SET` 是**会话级**的，只对执行它的那条连接生效 ——
 池子里其它连接还是默认值。所以参数必须**塞进 DSN**，让每条新连接自动带上。
@@ -155,21 +156,39 @@ func (r *tgMultiReader) windowConcurrency() int {
 ```toml
 [db]
 tune = true
-tune-work-mem-mb = 16
+tune-work-mem-mb = 0     # 0 = 按机器可用内存自动选（推荐）
 ```
+
+**work_mem 为什么必须自适应，不能写死**：
+
+本项目要跑在 2GB 电视盒子到几十 GB 的服务器上，同一个值在两头都是错的。
+早期版本把 `16` 写死成默认值，在小内存设备上反而成了负担 ——
+`work_mem` 是**按查询节点**分配的，一个复杂查询有多个排序节点就分配多份，
+再乘上并发连接数，叠起来很可观。
+
+现在分档（探测顺序：cgroup v2 → cgroup v1 → `/proc/meminfo`）：
+
+| 容器可用内存 | work_mem |
+|---|---|
+| ≤ 1GB | 4MB |
+| ≤ 2GB | 8MB |
+| > 2GB | 16MB |
+| 探测不到 | 8MB（保守） |
+
+显式配置（`>0`）永远优先，自动探测被跳过。
 
 | 参数 | 值 | 为什么 |
 |---|---|---|
 | `synchronous_commit` | `off` | 批量导入不用等 WAL fsync；崩溃最多丢最后几秒，且重扫幂等 |
-| `work_mem` | `16MB` | 目录排序 / 分类聚合不落盘做外部排序 |
+| `work_mem` | 自适应 4/8/16MB | 目录排序 / 分类聚合不落盘做外部排序 |
 | `jit` | `off` | 短查询上 JIT 编译开销大于收益 |
 
 启动后会**回读 `SHOW` 确认真的生效**（写错参数名 Postgres 不报错，只会静默不生效）。
 日志长这样：
 
 ```
-INFO [APP] db.tuning.applied  settings=[synchronous_commit=off work_mem=16MB jit=off] tune=true
-INFO [APP] db.tuning.verify   synchronous_commit=off work_mem=16MB jit=off
+INFO [APP] db.tuning.applied  settings=[synchronous_commit=off work_mem=8MB jit=off] tune=true
+INFO [APP] db.tuning.verify   synchronous_commit=off work_mem=8MB jit=off
 ```
 
 ### 五、WebDAV / 闸门 / 界面
@@ -182,6 +201,85 @@ INFO [APP] db.tuning.verify   synchronous_commit=off work_mem=16MB jit=off
 | `run.go` | 路由装配、调度器启动 |
 | `ui/app.js` / `ui/app.css` | **新增**。本项目自己的前端皮肤与交互 |
 | `ui/index.html` / `ui/tgpan-gate.js` | 注入前端脚本 |
+
+### 六、小设备启动可靠性（v2.7.2 新增）
+
+TV 盒子（如斐讯 N1，ARM64 / 2GB）上曾出现三类症状：
+**网页打不开**、**去连 5432 端口**、**容器反复重启**。
+排查后全部出在**本项目自己的代码 / 启动脚本**上，共 7 处，逐一修掉。
+
+| 文件 | 改动 | 修的是哪个症状 |
+|---|---|---|
+| `run.go` | 删掉 `findAvailablePort`，改为 `listenOnConfiguredPort` 直接绑定；绑不上**明确报错退出** | 网页打不开（元凶） |
+| `run.go` | **数据库连不上时不再退出**，改为「拿着端口等 DB 就绪」（循环重试 + 3 秒间隔） | 反复重启、打不开网页 |
+| `run.go` | 后台服务（cron / 事件 / redis 等待）失败不再 `os.Exit(1)`，改为记日志继续跑 | 反复崩溃 |
+| `internal_database_database.go` | DB 连接重试 5 次 → **60 次 + 指数退避**（0.5/1/2/4/4…s，约 90 秒窗口） | DB 没起完就放弃 |
+| `internal_database_tuning.go` | work_mem 按可用内存自适应 | 小机器内存吃紧 |
+| `docker/entrypoint.sh` | initdb 幂等判定加 `global/pg_control`；残缺数据目录移到 `.broken.<时间戳>` | 反复崩溃 |
+| `docker/entrypoint.sh` | 临时 PG 停止改为严格检查 + fast/immediate 重试 + 确认 status | 反复重启 |
+| `docker/supervisord.conf` | 直接调 `postgres`（不再套 pgroonga 入口脚本）；`startretries=100`；`stopsignal=INT` | 反复重启 |
+| `docker/teldrive-entry.sh` | 等 DB 时间 60→120 秒，超时明确报错 | 起不来 |
+
+#### 核心一：端口绝不能"静默换号"
+
+```go
+func listenOnConfiguredPort(port int) (net.Listener, error) {
+    ln, err := net.Listen("tcp", fmt.Sprintf(":%d", port))
+    if err != nil {
+        return nil, fmt.Errorf(
+            "无法监听端口 %d：%w\n"+
+                "       常见原因：该端口已被占用（比如上一次的容器没退干净）。\n"+
+                "       处理：改掉占用它的进程，或在宿主机上换一个映射端口（如 -p 18080:8080 后填 8080）。",
+            port, err)
+    }
+    return ln, nil
+}
+```
+
+为什么这条最要命：容器场景里端口映射是**写死**的（`-p 8080:8080`）。
+程序一旦发现 8080 被占就自己换到 8081，映射关系当场断掉 ——
+用户看到的是「容器在跑、日志也正常、但网页就是打不开」，完全无从排查。
+
+> 旧实现 `findAvailablePort` 还有一个隐性竞态：它先 `Listen` 探测再 `Close`，
+> 等真要绑的时候端口可能已被别人抢走。新版**直接绑、失败即报错**，没有中间态。
+
+#### 核心二：数据库没就绪时，要"拿着端口等"，不要退出
+
+同容器部署时，Postgres 由 supervisord 和 teldrive **并行拉起**。
+盒子 eMMC 慢、PG 首次启动要 initdb + 建 14 张表 + 建 pgroonga 扩展，
+几十秒是常态。旧逻辑一旦连不上就 `os.Exit(1)`，后果是：
+
+```
+进程死 → supervisord 拉起 → 又连不上 → 又死 …… 无限循环
+```
+
+用户看到「容器一直重启、网页永远打不开」，而且端口绑了又放，
+连"连不上的页面"都看不到。现在改成**循环等待**（单轮 90 秒上限 +
+3 秒间隔，直到成功或收到关闭信号）。日志长这样：
+
+```
+✓ INFO  server.listening          port=8080
+⚠ WARN  db.connection.failed      attempt=1 max_retries=61 retry_in=500ms
+⚠ WARN  db.connection.failed      attempt=2 max_retries=61 retry_in=1s
+⚠ WARN  db.connection.failed      attempt=3 max_retries=61 retry_in=2s
+⚠ WARN  db.connection.failed      attempt=4 max_retries=61 retry_in=4s
+✓ INFO  db.ready_after_waiting    rounds=2        ← 数据库起来后自动继续
+```
+
+**验收单测**（`cmd/run_port_test.go`，全 PASS）：
+
+| 单测 | 钉住什么 |
+|---|---|
+| `TestListenOnConfiguredPort_Success` | 端口空闲时能绑上，且端口号不变 |
+| `TestListenOnConfiguredPort_Occupied` | 端口被占**必须报错**，且错误信息含端口号 + 可操作建议 |
+| `TestListenOnConfiguredPort_NoSilentFallback` | 即使被占，也**不能**偷偷绑到下一个端口 |
+
+**真机行为实测**（amd64，沙箱内跑真实二进制）：
+
+| 场景 | 期望 | 实测 |
+|---|---|---|
+| 8080 空闲、DB 未就绪 | 端口绑上、进程不退出、指数退避重试 | ✅ `server.listening` + 12 秒内 `attempt=1..6`、进程存活 |
+| 8080 被占用 | 明确报错退出、**不换端口** | ✅ `退出码=1`、`server.port_unavailable`、未绑 8081 |
 
 ---
 
@@ -273,6 +371,7 @@ cp $S/security_test.go            pkg/services/security_test.go
 cp $S/internal_database_tuning_test.go   internal/database/tuning_test.go
 cp $S/internal_reader_window_test.go     internal/reader/window_test.go
 cp $S/internal_reader_timing_test.go     internal/reader/timing_test.go
+cp $S/run_port_test.go                   cmd/run_port_test.go
 
 # 5. 静态编译（关键：CGO_ENABLED=0）
 CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags "-s -w" -o teldrive-amd64 .
