@@ -4,27 +4,110 @@
  *  纯手写 CSS，零框架、零构建。配合 /app.js 使用。
  *  设计取向：百度网盘 / 阿里云盘那种「干净的白底 + 蓝色主色」，不要原版那套
  *  Material 三件套（卡片阴影 + 灰底 + 圆角 24px）。
+ *
+ *  主题：浅色为默认，深色由 @media (prefers-color-scheme: dark) 自动接管，
+ *        跟随系统设置，无需手动切换。所有颜色都收敛到下面「变量」这一处，
+ *        新增样式时请勿硬编码色值，否则深色下会露馅。
  * ---------------------------------------------------------------------------
  */
 
 /* ===== 变量 ===== */
 :root {
+  color-scheme: light;
+
   --brand: #2b7de9;
   --brand-dark: #1f6ad4;
   --brand-soft: #eaf3fe;
+  --brand-line: #bcd6f8;
+  --brand-glow: rgba(43, 125, 233, .1);
+  --brand-glow-2: rgba(43, 125, 233, .13);
+
   --bg: #f6f7f9;
   --panel: #ffffff;
+  --panel-2: #fbfcfd;          /* 略深于 panel 的底，用于嵌套区块 */
+  --hover: #f0f2f5;            /* 列表 / 菜单行的悬停底色 */
+  --hover-soft: #fafbfc;       /* 更轻的悬停，用于文件行 */
   --line: #eceef1;
   --line-strong: #dcdfe4;
+
   --text: #1f2329;
   --text-2: #5c6370;
   --text-3: #9099a6;
+
   --ok: #22a06b;
   --warn: #e6a23c;
   --danger: #e5484d;
+
+  /* 文件类型图标底色 */
+  --ic-video-bg: #fdeceb;  --ic-video-fg: #d6453d;
+  --ic-image-bg: #eef7ee;  --ic-image-fg: var(--ok);
+  --ic-audio-bg: #f4eefb;  --ic-audio-fg: #8b5cf6;
+  --ic-other-bg: #f1f3f5;  --ic-other-fg: var(--text-3);
+
+  /* 提示条：底色 + 对应的深色文字 */
+  --alert-info-bg: #eaf3fe;  --alert-info-fg: #17518f;
+  --alert-ok-bg: #eaf7f0;    --alert-ok-fg: #14663f;
+  --alert-warn-bg: #fdf6e8;  --alert-warn-fg: #8a5b09;
+  --alert-err-bg: #fdecec;   --alert-err-fg: #9f2b2e;
+
+  --danger-line: #f3c3c4;
+  --dot-off: #c3c8ce;
+
   --radius: 8px;
   --header-h: 56px;
   --shadow-pop: 0 8px 28px rgba(15, 23, 42, .14);
+}
+
+/* ===== 深色模式（跟随系统） =====
+ * 不提供手动开关 —— 手机上系统一改就跟着变，桌面端同理。
+ * 只覆盖颜色类变量，尺寸 / 圆角 / 阴影一律不动，保证两套主题是同一套版式。
+ * 配色的思路：底用近黑而非纯黑（纯黑衬白字太刺眼），
+ *             主色略微提亮（深底上原色会发闷），
+ *             各类提示条的底色改成「主色的极低透明度铺底 + 浅色文字」，
+ *             这样不用为每种状态单独试色，也和浅色版的语义一一对应。
+ */
+@media (prefers-color-scheme: dark) {
+  :root {
+    color-scheme: dark;
+
+    --brand: #4b93f0;
+    --brand-dark: #3b82e0;
+    --brand-soft: #16263c;
+    --brand-line: #2c4a72;
+    --brand-glow: rgba(75, 147, 240, .16);
+    --brand-glow-2: rgba(75, 147, 240, .2);
+
+    --bg: #16181c;
+    --panel: #1e2126;
+    --panel-2: #23262c;
+    --hover: #2a2e35;
+    --hover-soft: #23262c;
+    --line: #2c3038;
+    --line-strong: #3a3f48;
+
+    --text: #e8eaed;
+    --text-2: #a8b0bb;
+    --text-3: #737c88;
+
+    --ok: #4ec38a;
+    --warn: #e0b050;
+    --danger: #f2686c;
+
+    --ic-video-bg: #3a2526;  --ic-video-fg: #f2807a;
+    --ic-image-bg: #1f3529;  --ic-image-fg: #5fce97;
+    --ic-audio-bg: #2e2740;  --ic-audio-fg: #ab8df5;
+    --ic-other-bg: #2a2e35;  --ic-other-fg: var(--text-3);
+
+    --alert-info-bg: #16263c;  --alert-info-fg: #8bbcfa;
+    --alert-ok-bg: #17301f;    --alert-ok-fg: #77d3a2;
+    --alert-warn-bg: #33280f;  --alert-warn-fg: #e2b968;
+    --alert-err-bg: #3a1f20;   --alert-err-fg: #f2908f;
+
+    --danger-line: #6b2f31;
+    --dot-off: #4a5058;
+
+    --shadow-pop: 0 8px 28px rgba(0, 0, 0, .5);
+  }
 }
 
 * { box-sizing: border-box; }
@@ -245,8 +328,8 @@ input, select { font-family: inherit; }
 }
 
 .tp-folder:hover {
-  border-color: #bcd6f8;
-  box-shadow: 0 3px 12px rgba(43, 125, 233, .1);
+  border-color: var(--brand-line);
+  box-shadow: 0 3px 12px var(--brand-glow);
   transform: translateY(-1px);
 }
 
@@ -292,7 +375,7 @@ input, select { font-family: inherit; }
 }
 
 .tp-row:last-child { border-bottom: none; }
-.tp-row:hover { background: #fafbfc; }
+.tp-row:hover { background: var(--hover-soft); }
 .tp-row.is-clickable { cursor: pointer; }
 
 .tp-row-icon {
@@ -304,14 +387,14 @@ input, select { font-family: inherit; }
   align-items: center;
   justify-content: center;
   font-size: 15px;
-  background: #f1f3f5;
+  background: var(--ic-other-bg);
 }
 
 .tp-row-icon.folder { background: var(--brand-soft); color: var(--brand); }
-.tp-row-icon.video { background: #fdeceb; color: #d6453d; }
-.tp-row-icon.image { background: #eef7ee; color: var(--ok); }
-.tp-row-icon.audio { background: #f4eefb; color: #8b5cf6; }
-.tp-row-icon.other { background: #f1f3f5; color: var(--text-3); }
+.tp-row-icon.video { background: var(--ic-video-bg); color: var(--ic-video-fg); }
+.tp-row-icon.image { background: var(--ic-image-bg); color: var(--ic-image-fg); }
+.tp-row-icon.audio { background: var(--ic-audio-bg); color: var(--ic-audio-fg); }
+.tp-row-icon.other { background: var(--ic-other-bg); color: var(--ic-other-fg); }
 
 .tp-row-name {
   flex: 1;
@@ -375,7 +458,7 @@ input, select { font-family: inherit; }
 
 .tp-btn.primary:hover { background: var(--brand-dark); border-color: var(--brand-dark); color: #fff; }
 
-.tp-btn.danger { color: var(--danger); border-color: #f3c3c4; }
+.tp-btn.danger { color: var(--danger); border-color: var(--danger-line); }
 .tp-btn.danger:hover { background: var(--danger); border-color: var(--danger); color: #fff; }
 
 .tp-btn.sm { padding: 4px 10px; font-size: 12.5px; }
@@ -394,7 +477,7 @@ input, select { font-family: inherit; }
 
 .tp-linkbtn:hover { background: var(--brand-soft); }
 .tp-linkbtn.danger { color: var(--danger); }
-.tp-linkbtn.danger:hover { background: #fdeceb; }
+.tp-linkbtn.danger:hover { background: var(--ic-video-bg); }
 
 /* ===== 表单 ===== */
 .tp-field { margin-bottom: 13px; }
@@ -420,7 +503,7 @@ input, select { font-family: inherit; }
 
 .tp-input:focus, .tp-select:focus {
   border-color: var(--brand);
-  box-shadow: 0 0 0 3px rgba(43, 125, 233, .13);
+  box-shadow: 0 0 0 3px var(--brand-glow-2);
 }
 
 .tp-select { cursor: pointer; }
@@ -456,7 +539,7 @@ input, select { font-family: inherit; }
 .tp-settings-nav {
   border-right: 1px solid var(--line);
   padding: 10px 8px;
-  background: #fbfcfd;
+  background: var(--panel-2);
 }
 
 @media (max-width: 780px) {
@@ -484,7 +567,7 @@ input, select { font-family: inherit; }
   white-space: nowrap;
 }
 
-.tp-settings-item:hover { background: #f0f2f5; color: var(--text); }
+.tp-settings-item:hover { background: var(--hover); color: var(--text); }
 
 .tp-settings-item.is-active {
   background: var(--brand-soft);
@@ -493,7 +576,7 @@ input, select { font-family: inherit; }
 }
 
 .tp-settings-item.danger { color: var(--danger); }
-.tp-settings-item.danger:hover { background: #fdeceb; }
+.tp-settings-item.danger:hover { background: var(--ic-video-bg); }
 
 .tp-settings-body { padding: 20px 22px; }
 @media (max-width: 780px) { .tp-settings-body { padding: 16px; } }
@@ -520,10 +603,10 @@ input, select { font-family: inherit; }
   margin-bottom: 14px;
 }
 
-.tp-alert.info { background: var(--brand-soft); color: #17518f; }
-.tp-alert.ok { background: #eaf7f0; color: #14663f; }
-.tp-alert.warn { background: #fdf6e8; color: #8a5b09; }
-.tp-alert.err { background: #fdecec; color: #9f2b2e; }
+.tp-alert.info { background: var(--alert-info-bg); color: var(--alert-info-fg); }
+.tp-alert.ok { background: var(--alert-ok-bg); color: var(--alert-ok-fg); }
+.tp-alert.warn { background: var(--alert-warn-bg); color: var(--alert-warn-fg); }
+.tp-alert.err { background: var(--alert-err-bg); color: var(--alert-err-fg); }
 
 /* ===== 状态点 ===== */
 .tp-dot {
@@ -536,7 +619,7 @@ input, select { font-family: inherit; }
 }
 
 .tp-dot.on { background: var(--ok); }
-.tp-dot.off { background: #c3c8ce; }
+.tp-dot.off { background: var(--dot-off); }
 .tp-dot.err { background: var(--danger); }
 
 /* ===== 空状态 ===== */
@@ -782,14 +865,14 @@ input, select { font-family: inherit; }
   padding: 1px 7px;
   font-size: 11.5px;
   border-radius: 4px;
-  background: #f1f3f5;
+  background: var(--ic-other-bg);
   color: var(--text-2);
   vertical-align: middle;
 }
 
 .tp-tag.blue { background: var(--brand-soft); color: var(--brand); }
-.tp-tag.ok { background: #eaf7f0; color: var(--ok); }
-.tp-tag.warn { background: #fdf6e8; color: #8a5b09; }
+.tp-tag.ok { background: var(--alert-ok-bg); color: var(--ok); }
+.tp-tag.warn { background: var(--alert-warn-bg); color: var(--alert-warn-fg); }
 
 /* 已停用的频道行：整体压暗，让「这行不干活了」一眼可辨。
    注意只降不透明度，不做 pointer-events:none —— 用户还得能点「重新开启」。 */

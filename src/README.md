@@ -186,9 +186,18 @@ git checkout <与本文档匹配的 tag>      # 本项目基线为 v1.8.3，后�
 curl -sL -o openapi.json https://raw.githubusercontent.com/tgdrive/teldrive-docs/main/openapi/openapi.json
 go run github.com/ogen-go/ogen/cmd/ogen --clean --package api --target internal/api openapi.json
 
-# 3. 解压前端到 ui/dist
-curl -sL -o ui.zip "https://ghfast.top/https://github.com/tgdrive/teldrive-ui/releases/download/latest/teldrive-ui.zip"
-mkdir -p ui/dist && unzip -q ui.zip -d ui/dist
+# 3. 铺前端到 ui/dist
+#    ★ 本项目前端是**自制的**（ui/ 下四个文件），不依赖官方 UI 包。
+#      不要再去下载 tgdrive/teldrive-ui —— 那是官方界面，会被下面的自制前端覆盖，
+#      白下十几 MB。
+mkdir -p ui/dist
+cp <本项目>/ui/index.html      ui/dist/index.html
+cp <本项目>/ui/app.css         ui/dist/app.css
+cp <本项目>/ui/app.js          ui/dist/app.js
+cp <本项目>/ui/tgpan-gate.js   ui/dist/tgpan-gate.js
+cp <本项目>/ui/robots.txt      ui/dist/robots.txt
+cp -r <本项目>/ui/fonts        ui/dist/fonts
+cp -r <本项目>/ui/images       ui/dist/images
 
 # 4. 把 src/ 的文件按上表还原到上游目录（全部都要替换，没有例外）
 S=<本项目>/src
@@ -229,10 +238,6 @@ cp $S/episode_test.go             pkg/services/episode_test.go
 cp $S/security_test.go            pkg/services/security_test.go
 cp $S/internal_database_tuning_test.go   internal/database/tuning_test.go
 cp $S/internal_reader_window_test.go     internal/reader/window_test.go
-
-cp <本项目>/ui/app.js  ui/dist/app.js
-cp <本项目>/ui/app.css ui/dist/app.css
-#   …ui/dist/index.html 里加对应的 <script> / <link>
 
 # 5. 静态编译（关键：CGO_ENABLED=0）
 CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags "-s -w" -o teldrive-amd64 .
