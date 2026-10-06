@@ -12,13 +12,31 @@
 #  对外端口：
 #    8080  → Web 界面（看片、管理文件、挂载播放器）
 #
+#  对外挂载：
+#    /data → 数据库 + TG 会话 + 配置（容器重建不丢）
+#
+#  只有这一挂载、这一端口。界面上新建容器时不会有别的多余项。
+#
 #  构建：docker build -t tgpan .
 #  运行：docker run -d -p 8080:8080 -v tgpan-data:/data tgpan
 #
 #  支持的平台：linux/amd64、linux/arm64（见 vendor/ 下的两个包）
 # ==========================================================================
 
-ARG PG_IMAGE=groonga/pgroonga:latest-alpine-17
+# 为什么不用 `FROM ${PG_IMAGE}` 一行搞定？
+# ----------------------------------------------------------------------
+# pgroonga 官方镜像自带两条我们**用不上**的元数据：
+#     VOLUME /var/lib/postgresql/data   ← 我们的数据在 /data/postgres
+#     EXPOSE 5432                       ← 我们只监听 127.0.0.1，不对外
+# 这两条会一路继承到最终镜像，导致界面上（飞牛 / 群晖 / 各种 NAS）新建容器时
+# 被要求**多填一个存储挂载、多填一个端口**。而 Docker 的 VOLUME / EXPOSE
+# **只能加不能删** —— FROM 之后没有任何指令能撤销继承来的这两条。
+#
+# 所以改成「两段式」：先用 pgroonga 当素材，挂到 alpine 上，再 COPY 整个根文件系统。
+# 继承链一断，元数据就只剩我们自己声明的那一个挂载、一个端口。
+# 依赖（apk 包 + /usr/local 下从源码编的 PG 与 groonga）全部原样搬过去，一个不漏。
+ARG PG_SRC=groonga/pgroonga:latest-alpine-17
+ARG ALPINE_VER=3.24
 
 # ---------- Stage 1: 取 Teldrive 二进制（从本地 vendor 目录，避免构建时联网）----------
 FROM alpine:3.20 AS fetcher
@@ -42,8 +60,20 @@ RUN set -eux; \
     tar -xzf "/vendor/teldrive-${A}.tar.gz" -C /out; \
     chmod +x /out/teldrive
 
-# ---------- Stage 2: 运行时 ----------
-FROM ${PG_IMAGE}
+# ---------- Stage 2: 数据库素材（只用来取文件，元数据不带下去）----------
+FROM ${PG_SRC} AS dbsrc
+
+
+# ---------- Stage 3: 运行时 ----------
+# 用干净的 alpine 起手，把 Stage 2 的根文件系统整个搬过来。
+# 这样继承链断开，pgroonga 那两条多余的 VOLUME / EXPOSE 不会被继承。
+FROM alpine:${ALPINE_VER}
+
+COPY --from=dbsrc / /
+
+# 保留 pgroonga 镜像原本的入口脚本（我们用不到它的 ENTRYPOINT，
+# 但 postgres 的 initdb 逻辑有些会调它，留着以防万一）。
+# 注意：/usr/local/bin/docker-entrypoint.sh 已随根文件系统一起搬过来了。
 
 # TGPan 版本号。容器启动横幅会打印它（见 docker/entrypoint.sh）。
 # 默认值与仓库根目录的 VERSION 文件保持一致，构建时可覆盖：
