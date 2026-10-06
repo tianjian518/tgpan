@@ -232,7 +232,25 @@ type TGStream struct {
 	// 所以这里的做法是：**首个窗口永远只发 1 个请求**（见 FirstWindowChunks），
 	// 等它回来了、播放器开始播了，后面的窗口再按 PrefetchWindows 放大。
 	// 这样起播延迟和吞吐就不再互相打架。
-	PrefetchWindows int `default:"8" description:"Concurrency multiplier for windows AFTER the first one (first window is always 1 request)"`
+	//
+	// 【默认值 8 → 3】（v2.7.1）
+	//
+	// 并发开多大，取决于「要播的码率有多高」，不是越大越好。
+	// 本项目自带吞吐实测（internal/reader/timing_test.go，单块基准 600ms）：
+	//
+	//	 1 路  1.66 MB/s   只够 1080p
+	//	 2 路  3.13 MB/s   可播 4K
+	//	 3 路  4.44 MB/s   4K 有余量  ← 默认值
+	//	 8 路 10.65 MB/s   远超需求
+	//
+	// 1080p 需 0.5-1.25 MB/s，4K 需 1.9-5 MB/s。开 8 路等于拿 10 MB/s
+	// 的本事去干 4 MB/s 的活，多的并发不会更快，反而两头受损：
+	//   1. 抢首块带宽 —— 要播的第一块得跟自己后面 7 路抢，起播反而慢
+	//   2. 打满链路 —— 在 CF 免费隧道这类受条款约束的链路上，尤其容易
+	//      触发限速（本项目用户实测：隧道下加载要十几秒）
+	//
+	// 想跑蓝光原盘（40-80 Mbps）可以自己调回 6-8；只压 1080p 的调到 2 也行。
+	PrefetchWindows int `default:"3" description:"Concurrency multiplier for windows AFTER the first one (first window is always 1 request)"`
 
 	// FirstWindowChunks 首个窗口发几个 chunk 请求。默认 1，别改。
 	FirstWindowChunks int `default:"1" description:"Number of chunk requests in the first window (keep at 1 for fastest start)"`

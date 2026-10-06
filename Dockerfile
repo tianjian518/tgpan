@@ -47,8 +47,8 @@ FROM ${PG_IMAGE}
 
 # TGPan 版本号。容器启动横幅会打印它（见 docker/entrypoint.sh）。
 # 默认值与仓库根目录的 VERSION 文件保持一致，构建时可覆盖：
-#   docker build --build-arg TGPAN_VERSION=2.7.0 -t tgpan .
-ARG TGPAN_VERSION=2.7.0
+#   docker build --build-arg TGPAN_VERSION=2.7.1 -t tgpan .
+ARG TGPAN_VERSION=2.7.1
 ENV TGPAN_VERSION=${TGPAN_VERSION}
 
 # 运行所需工具（supervisor 同时管理数据库和 Teldrive）

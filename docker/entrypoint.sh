@@ -122,6 +122,23 @@ key = 'session'
 [tg.stream]
 buffers = 8
 concurrency = 1
+# 首窗口之后的并发放大倍数。
+#
+# 【为什么默认值从 8 降到 3】
+# 真机实测（internal/reader/timing_test.go，单块耗时基准 600ms）：
+#   prefetch=1  吞吐 1.66 MB/s  —— 只够 1080p
+#   prefetch=2  吞吐 3.13 MB/s  —— 可播 4K
+#   prefetch=3  吞吐 4.44 MB/s  —— 4K 有余量  ← 默认值
+#   prefetch=8  吞吐 10.65 MB/s —— 远超需求，纯属抢带宽
+#
+# 1080p 只要 0.5-1.25 MB/s，4K 也就 1.9-5 MB/s。开 8 路是拿 10 MB/s
+# 的能力去干 4 MB/s 的活，多出来的并发不会更快，反而：
+#   1. 抢占首块带宽 —— 你要播的第一块得跟自己后面 7 路抢，起播更慢
+#   2. 打满隧道 —— 在 CF 免费隧道这种受条款限制的链路上尤其容易触发限速
+# 3 是实测出来的平衡点：4K 有富余，又不会把链路占满。
+prefetch-windows = 3
+# 单个分片下载超时。30s 太长 —— 真撞上坏块时，一整轮都得陪它等满才报错。
+chunk-timeout = '20s'
 
 [cronjobs]
 enable = true

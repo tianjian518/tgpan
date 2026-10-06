@@ -63,8 +63,9 @@
 |---|---|
 | `internal_reader_tg_reader.go`（`internal/reader/tg_reader.go`） | `tgMultiReader` 改为**滑动窗口**取块 |
 | `internal_reader_reader.go` | 清掉不再使用的 `concurrency` 字段 |
-| `internal_reader_window_test.go` | **新增**。6 个单测 |
-| `config.go` | 新增 `stream.prefetch-windows`、`stream.first-window-chunks` |
+| `internal_reader_window_test.go` | **新增**。6 个单测（数据正确性） |
+| `internal_reader_timing_test.go` | **新增**。5 个时序单测（首字节 / seek / 吞吐曲线） |
+| `config.go` | 新增 `stream.prefetch-windows`（默认 **3**）、`stream.first-window-chunks` |
 
 **为什么是"滑动窗口"而不是"加大并发"**：
 
@@ -106,6 +107,39 @@ func (r *tgMultiReader) windowConcurrency() int {
 
 > 数据完整性用 `patternChunkSource` 校验：每个字节 = 绝对偏移 % 251，
 > 任何错位都会立刻暴露，而不是"看起来能播"。
+
+**时序单测**（`internal_reader/timing_test.go`，全 PASS）：
+
+用 `timedSource` 给每个 `Chunk()` 注入固定延迟（模拟 TG 单块 RTT），
+测的是"延迟已经存在的前提下，并发策略怎么选最优"。
+
+| 单测 | 钉住什么 |
+|---|---|
+| `TestFirstByteLatency` | 首字节 = 1 个 chunk 的 RTT，**与 prefetch 无关** |
+| `TestSeekLatency` | seek 之后首字节同样 = 1 个 RTT，prefetch 帮不上忙 |
+| `TestWindowBatchBlocking` | 一个窗口内 N 路并发只花 1 个 RTT（不是 N 个） |
+| `TestThroughputVsPrefetch` | 吞吐随 prefetch 增长但**边际递减** |
+| `TestPrefetchEnoughFor1080p` | prefetch=3 的吞吐已足够 1080p 码率 |
+
+> **这两个数字决定了所有"加速"的天花板**：延迟由**单块 RTT** 决定，不由
+> prefetch 决定；prefetch 只能提吞吐。所以"拉进度条要等十几秒"如果实测首字节
+> 只有 0.8 秒，那多出来的时间**一定在网络链路，改代码无效**。
+
+实测（delay = 600ms，单块 512KB）：
+
+| prefetch | 吞吐 |
+|---|---|
+| 1 | 1.66 MB/s |
+| 2 | 3.13 MB/s |
+| 3 | 4.44 MB/s |
+| 4 | 5.92 MB/s |
+| 6 | 7.61 MB/s |
+| 8 | 10.65 MB/s |
+
+**所以默认 `prefetch-windows` 定 3**：4.44 MB/s 已经远超 1080p 蓝光原盘码率
+（～1.7 MB/s），再往上拉吞吐，代价是并发请求数线性上涨 —— 而 TG 对单账号
+有速率限制，并发拉高到 8 路以上会触发限流，实测吞吐反而回落、首字节也被拖慢。
+**3 是"够用 + 留余量给限流"的平衡点。**
 
 ### 四、数据库连接级调优（v2.7.0 新增）
 | 文件 | 改动 |
@@ -238,6 +272,7 @@ cp $S/episode_test.go             pkg/services/episode_test.go
 cp $S/security_test.go            pkg/services/security_test.go
 cp $S/internal_database_tuning_test.go   internal/database/tuning_test.go
 cp $S/internal_reader_window_test.go     internal/reader/window_test.go
+cp $S/internal_reader_timing_test.go     internal/reader/timing_test.go
 
 # 5. 静态编译（关键：CGO_ENABLED=0）
 CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags "-s -w" -o teldrive-amd64 .
