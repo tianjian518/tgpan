@@ -56,6 +56,17 @@ func NewRun() *cobra.Command {
 			if err := loader.Validate(&cfg); err != nil {
 				return err
 			}
+			// 【必须在配置加载后立刻执行，不能拖到第一次连 TG】
+			//
+			// 这一步把 app-id / app-hash / 设备身份修正到**终态**。
+			// 以前只在 newClient（第一次连 TG 时）调用，于是存在一个空档期：
+			// 配置已加载但尚未连 TG，此时「自检」页面读到的还是配置文件里的
+			// 原始 app-id=2496 —— 用户看到这个值，会以为凭据没生效、
+			// 进而怀疑「收不到验证码是凭据问题」，排查方向被带偏。
+			//
+			// 放在这里，内存中的配置从启动第一秒起就是最终值，
+			// 界面显示、TG 客户端、日志三者完全一致。
+			tgc.ApplyEnvOverrides(&cfg.TG)
 			return nil
 		},
 	}

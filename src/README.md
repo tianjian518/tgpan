@@ -372,6 +372,7 @@ cp $S/episode_test.go             pkg/services/episode_test.go
 cp $S/security_test.go            pkg/services/security_test.go
 cp $S/internal_database_tuning_test.go   internal/database/tuning_test.go
 cp $S/internal_retry_test.go             internal/retry/retry_test.go
+cp $S/internal_tgc_env_override_test.go  internal/tgc/env_override_test.go
 cp $S/internal_reader_window_test.go     internal/reader/window_test.go
 cp $S/internal_reader_timing_test.go     internal/reader/timing_test.go
 cp $S/run_port_test.go                   cmd/run_port_test.go

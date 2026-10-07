@@ -28,7 +28,7 @@ import (
 	"gorm.io/gorm"
 )
 
-// applyTGEnvOverrides 允许通过环境变量覆盖 Telegram 应用凭据与设备信息。
+// ApplyEnvOverrides 允许通过环境变量覆盖 Telegram 应用凭据与设备信息。
 //
 // 背景：Teldrive 默认使用 app-id=2496 / device-model=Firefox 的"网页版"伪装，
 // Telegram 对这种客户端可能不投递登录验证码（官方文档明确网页版 WebK/WebA
@@ -45,7 +45,29 @@ import (
 //	TELDRIVE_TG_LANG_CODE     语言代码，如 zh
 //	TELDRIVE_TG_LANG_PACK     语言包，留空则使用默认
 //	TELDRIVE_TG_REAL_DEVICE   设为 1 时，强制切换为真实移动端身份（默认开启）
-func applyTGEnvOverrides(cfg *config.TGConfig) {
+//
+// 【为什么必须是公开函数 + 必须在启动时先调一次】
+//
+// 这个函数原本是私有的，只在 newClient 里调用 —— 也就是**第一次要连 TG 时**
+// 才执行。问题在于：
+//
+//	配置加载（cmd/run.go 的 PersistentPreRunE）
+//	  ↓
+//	  读取 app-id = 2496（配置文件里就是这么写的）
+//	  ↓
+//	  ★ 这里有个空档：还没人连 TG，applyTGEnvOverrides 尚未执行 ★
+//	  ↓
+//	  「自检」页面（pkg/services/diag.go）读 cnf.TG.AppId
+//	  ↓
+//	  显示 app-id=2496  ← 用户看到的就是这个
+//
+// 结果是：**TG 客户端用的凭据其实是对的（27335138），但界面显示的是错的（2496）**。
+// 用户据此误判「凭据没生效 / 收不到验证码」，实际两者不一致，排查方向被带偏。
+//
+// 修法：把这个函数导出，在配置加载完成后**立刻**调用一次，让内存里的配置
+// 从一开始就是终态。newClient 里仍保留调用（幂等，无害），兼顾其他入口
+// （如 cmd/check.go）不经过 runApplication 的情况。
+func ApplyEnvOverrides(cfg *config.TGConfig) {
 	if cfg == nil {
 		return
 	}
@@ -101,7 +123,7 @@ func applyTGEnvOverrides(cfg *config.TGConfig) {
 func newClient(ctx context.Context, config *config.TGConfig, handler telegram.UpdateHandler, storage session.Storage, middlewares ...telegram.Middleware) (*telegram.Client, error) {
 
 	// 应用环境变量覆盖（应用凭据 + 真实设备身份），必须在构造客户端之前。
-	applyTGEnvOverrides(config)
+	ApplyEnvOverrides(config)
 
 	var dialer dcs.DialFunc = proxy.Direct.DialContext
 	if config.Proxy != "" {

@@ -149,7 +149,20 @@ session-ttl = '30d'
 disable = false
 
 [tg]
-# 使用 Teldrive 内置的公共应用凭据，用户侧只需手机号/扫码登录
+# Telegram 应用凭据。
+#
+# 【这里的两行是「代理凭据占位」，程序启动时会自动换掉】
+# 2496 是 Teldrive 上游默认的 web.telegram.org 网页版共享凭据。
+# Telegram 官方明确网页版不属于「可接收登录验证码的客户端类型」，
+# 用它**收不到验证码**——很多人卡在这一步。
+#
+# 程序启动时只要读到 2496（或配套的 8da85b0d... 这个 hash），
+# 就会自动替换为 TGPan 内置的移动端凭据，无需你手动改。
+# 因此你在「自检」页面看到 27335138 是正常的、正确的。
+#
+# 想用你自己申请的 api_id / api_hash，二选一：
+#   1. 直接改下面两行
+#   2. 设环境变量 TELDRIVE_TG_APP_ID / TELDRIVE_TG_APP_HASH（优先级最高）
 app-id = 2496
 app-hash = '8da85b0d5bfe62527e5b244c209159c3'
 auto-channel-create = true
