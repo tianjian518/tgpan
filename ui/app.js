@@ -376,8 +376,7 @@
     // 用户名从闸门状态里取（/gate/status 已带 name / user）。
     //
     // 为什么不调 /users/profile/{name}：那个接口要先知道自己的用户名，
-    // 而「我是谁」这件事本来就得先问一次。闸门状态里现成有，省一次请求，
-    // 而且在未配对 TG 的情况下也能正常显示（那个接口会 500）。
+    // 而「我是谁」这件事本来就得先问一次。闸门状态里现成有，省一次请求。
     req('/gate/status').then(function (st) {
       var name = (st && (st.name || st.user)) || '';
       var u = document.getElementById('tp-user');
@@ -386,14 +385,12 @@
   }
 
   function doLogout() {
-    // 退出必须打「闸门」的登出，不是 TG 的。
+    // 退出 = 清掉服务端的 TG 凭证 + 浏览器门票，回到登录页。
     //
-    // 这两套是完全独立的登录态：
+    // 注意 /auth/logout 和 /gate/logout 是两套：
     //   /auth/logout 清的是 TG 用户 cookie（access_token）
-    //   /gate/logout 清的才是闸门 cookie（tgpan_gate）——也就是「管理密码/内网」
-    //   换来的那道门
-    // 之前这里错写成 /auth/logout，导致用管理密码进来后点「退出」，
-    // 页面刷一下人还在里面——门根本没锁上。
+    //   /gate/logout 清的是 TGPan 的登录态（TG 凭证 + tgpan_gate 门票）
+    // 这里要的是后者 —— 真正让「这个人」出去。
     req('/gate/logout', { method: 'POST' }).then(function () {
       location.reload();
     }).catch(function () {
@@ -1446,7 +1443,7 @@
 
     // 先画骨架，但**先别发业务请求**。
     //
-    // 原因：闸门（管理密码 / 初始设置 / 外网登录）会盖一层遮罩，而它的
+    // 原因：闸门（扫码 / 验证码登 TG）会盖一层遮罩，而它的
     // 状态是异步问出来的。如果这里上来就 loadRoot()，在闸门还没放行的那
     // 一瞬间 /api/files 会 401，界面先渲染一个「读取网盘失败」的红框，
     // 紧接着才被遮罩盖住 —— 用户能看到报错闪一下，以为坏了。
@@ -1468,7 +1465,7 @@
       else loadSettingsPane();
     }
 
-    // 闸门已经放行（内网免密最常见）→ 立刻加载。
+    // 闸门已经放行（已配对 TG）→ 立刻加载。
     // 两种信号都认：window 标记（防事件早于监听器发出）和 html 属性。
     if (window.__tgpanGateOk ||
         document.documentElement.getAttribute('data-tgpan-gate') === 'ok') {

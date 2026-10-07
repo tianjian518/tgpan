@@ -193,9 +193,8 @@ func NewApiService(db *gorm.DB,
 		channelManager: tgc.NewChannelManager(db, cache, &cnf.TG),
 	}
 
-	// 初始化 TGPan 自有登录闸门。
-	// 失败不致命：降级为原版「只有 TG 扫码」的登录方式，
-	// 只是用户没法用管理密码进入而已。
+	// 初始化 TGPan 登录闸门。
+	// 失败不致命：降级为原版「只有 TG 扫码」的登录方式。
 	g, err := newGateService(
 		cnf.Gate.DataFile,
 		cnf.Gate.RequireLoginHosts,
@@ -208,7 +207,6 @@ func NewApiService(db *gorm.DB,
 		svc.gate = g
 		logging.Component("GATE").Info("gate.init.completed",
 			zap.String("dataFile", cnf.Gate.DataFile),
-			zap.Strings("requireLoginHosts", cnf.Gate.RequireLoginHosts),
 		)
 	}
 
@@ -252,26 +250,22 @@ func (m *extendedMiddleware) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if sub := gatePath(r.URL.Path); sub != "" {
 		// 只处理明确命中的子路径，避免把 /gateway 之类也吞掉
 		switch sub {
-		case "/status", "/setup", "/login", "/logout", "/password", "/repair":
+		case "/status", "/claim", "/logout", "/repair":
 			m.srv.GateHTTP(w, r, sub)
 			return
 		}
 	}
 
 	// ---- 闸门拦截 ----
-	// 未初始化 / 未配对 / 当前 Host 需要登录且未登录时，
-	// 所有 API 请求一律拒绝，并告知前端该显示哪个界面。
+	// 还没配对 TG → 所有 API 请求一律拒绝，并告知前端该显示登录页。
 	//
 	// 例外（不拦，否则会造成可见故障）：
 	//   · /version、/health —— 容器健康检查与前端探测，只暴露版本号
-	//   · WebDAV 的 OPTIONS —— 播放器（爆米花/Infuse）挂载前会先发不带凭据的
-	//     OPTIONS 探测能力，靠响应里的 DAV 头判断"对面是不是 WebDAV 服务器"。
-	//     被闸门拦掉会丢 DAV 头 → 播放器直接判挂载失败，连密码框都不弹。
+	//   · /auth/* —— 登录 TG 本身的接口（扫码 / 验证码），否则登录页连不上
+	//   · WebDAV 文件路径 —— 有自己的 Basic 认证，见 gateExemptRequest
 	if g := m.srv.gate(); g != nil && !gateExemptRequest(r) {
 		st := g.Status(r)
-		// need_pair 属于「已放行、但还没配对 TG」——必须让请求通过，
-		// 否则配对页自己会被拦掉，用户永远配不上。
-		if st.State == gateStateInit || st.State == gateStateNeedLogin {
+		if st.State != gateStateOK {
 			writeJSON(w, http.StatusUnauthorized, map[string]any{
 				"error": "gate not satisfied",
 				"gate":  st,
@@ -279,19 +273,11 @@ func (m *extendedMiddleware) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		// 配对通道（/api/auth/*）需要特殊处理：
-		//
-		// · need_pair —— 用户已放行但还没配对 TG，此刻系统里**没有任何
-		//   可用凭证**，SynthesizeAccessToken 也合成不出来。而配对页必须
-		//   连上 /auth/ws 扫码。这类请求跳过「合成凭证」这一步，
-		//   继续往下交给 ogen（这些接口自身就是登录逻辑，不挂安全要求）。
-		// · ok —— 已配对且已放行，同理放行让原逻辑工作（换 TG 账号等）。
-		//
-		// 注意：只在闸门已放行（need_pair / ok）时才豁免；init 和
-		// need_login 在上面就被拦掉了，外网未登录的人无法借道这里绕过闸门。
-		//
+		// 已配对：把服务端主凭证合成成 access_token 塞进请求，
+		// 让下游 ogen 鉴权自然通过（否则「完全没带凭证」的请求
+		// 会被安全中间件直接拦掉，走不到凭证兜底逻辑）。
 		// 这里**不能 return**：return 会直接丢掉请求，什么响应都不回。
-		if !gatePairPath(r.URL.Path) && m.srv.api != nil && m.srv.api.cnf != nil {
+		if m.srv.api != nil && m.srv.api.cnf != nil {
 			if tok, ok := g.SynthesizeAccessToken(m.srv.api.cnf.JWT.Secret); ok {
 				if _, err := r.Cookie(authCookieName); err != nil {
 					r.AddCookie(&http.Cookie{Name: authCookieName, Value: tok})

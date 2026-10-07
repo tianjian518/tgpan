@@ -10,7 +10,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"net"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -20,44 +19,45 @@ import (
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
-	"golang.org/x/crypto/bcrypt"
 
 	"github.com/tgdrive/teldrive/internal/auth"
 	"github.com/tgdrive/teldrive/pkg/types"
 )
 
 // ---------------------------------------------------------------------------
-//  TGPan 闸门（Gate）
+//  TGPan 登录闸门（Gate）—— 极简版
 //
-//  目标：把「TG 配对」和「日常进入」解耦。
+//  一句话：容器起来 → 打开网页 → 扫码或验证码登 TG → 能用。
 //
-//    第一次部署 → 用户自己设一个管理密码 → 扫码配对 TG 一次
-//    以后       → 内网入口免密直进；对外域名只要输管理密码，永不再扫码
+//  没有管理密码，没有内外网区分，没有域名白名单。
+//  以前那几层全砍掉了，原因写在下面「走过的弯路」里。
 //
-//  数据文件 /data/tgpan-gate.json 同时保存：
-//    - 管理密码的 bcrypt 哈希
-//    - TG 主凭证（session + 用户信息）
+//  数据文件 /data/tgpan-gate.json 只存两样东西：
+//    - TG 主凭证（session + 用户信息）—— 账号密钥，是敏感数据，
+//      且容器重启不能丢，所以必须落盘在 /data，不能只放浏览器
+//    - GateSecret —— 给浏览器 Cookie 签名的密钥
 //
-//  放在 /data 下 = 容器重启 / 重建 / 升级镜像都不丢。
+//  浏览器 Cookie 只存一个「已配对」的签名标记，不含账号信息。
+//  换句话说：凭证在服务端，浏览器拿的只是一张门票。
+//  为什么不能把 TG session 放 Cookie？它是长字符串密钥，
+//  放 Cookie 等于把账号密钥交给客户端，且每次请求都要带着走。
 // ---------------------------------------------------------------------------
 
 const (
 	gateFileName   = "tgpan-gate.json"
 	gateCookieName = "tgpan_gate"
 
-	// 状态值
-	gateStateInit      = "init"       // 没设密码也没凭证：需要「设置初始密码」
-	gateStateNeedPair  = "need_pair"  // 有密码没凭证：需要扫码配对 TG
-	gateStateReady     = "ready"      // 都齐了
-	gateStateNeedLogin = "need_login" // 访问当前 Host 需要密码，但还没登录
-	gateStateOK        = "ok"         // 放行
+	// 三个状态，对应前端三块界面
+	gateStateNeedLogin = "need_login" // 还没配对 TG → 展示扫码 / 验证码登录页
+	gateStateNeedPair  = "need_pair"  // 兼容旧前端：等同 need_login
+	gateStateOK        = "ok"         // 已配对 → 放行进主界面
+
+	// 保留旧状态名只为兼容历史前端产物，逻辑上不再使用
+	gateStateInit = "need_login"
 )
 
-// gateData 是落盘的数据结构。所有字段都可 JSON 序列化。
+// gateData 是落盘的数据结构。
 type gateData struct {
-	// 管理密码（bcrypt 哈希的 hex）。空 = 还没设置。
-	PasswordHash string `json:"passwordHash,omitempty"`
-
 	// TG 主凭证。
 	MasterSession string `json:"masterSession,omitempty"` // TG session（StringSession 编码）
 	MasterUserID  int64  `json:"masterUserId,omitempty"`
@@ -66,8 +66,18 @@ type gateData struct {
 	MasterHash    string `json:"masterHash,omitempty"` // 对应的 sessions 表 hash
 	PairedAt      string `json:"pairedAt,omitempty"`
 
-	// 闸门通行证签名密钥。首次写入时随机生成，之后固定。
+	// Cookie 签名密钥。首次写入时随机生成，之后固定。
 	GateSecret string `json:"gateSecret,omitempty"`
+
+	// Claims 是登录成功后的一次性领取码（短命，不落盘）。
+	Claims []gateClaim `json:"-"`
+
+	// PasswordHash 是历史遗留字段（旧版本存的管理密码哈希）。
+	//
+	// 保留声明只在 unmarshal 时不报错、marshal 时原样丢弃。
+	// 升级上来的老用户文件里会有这个字段，读出来忽略即可，
+	// 不需要用户手动删文件。
+	PasswordHash string `json:"passwordHash,omitempty"`
 }
 
 // gateService 闸门服务。所有公开方法都是并发安全的。
@@ -77,25 +87,25 @@ type gateService struct {
 	data gateData
 }
 
-// gateConfigView 是 gate 服务需要的配置子集，
-// 这样不用把整个 ServerCmdConfig 拖进来。
+// gateConfigView 是 gate 服务需要的配置子集。
 type gateConfigView struct {
-	DataFile          string
-	RequireLoginHosts []string
-	SessionTTL        time.Duration
-	Disable           bool
+	DataFile   string
+	SessionTTL time.Duration
+	Disable    bool
 }
 
 // newGateService 载入 / 初始化闸门数据。
-func newGateService(dataFile string, requireHosts []string, ttl time.Duration, disable bool) (*gateService, error) {
+//
+// 第二个参数保留（旧配置的 require-login-hosts），不再参与任何判定 ——
+// 只为让老配置文件能被解析，不至于因为多了一个键就启动失败。
+func newGateService(dataFile string, _ []string, ttl time.Duration, disable bool) (*gateService, error) {
 	if dataFile == "" {
 		dataFile = "/data/" + gateFileName
 	}
 	g := &gateService{cfg: &gateConfigView{
-		DataFile:          dataFile,
-		RequireLoginHosts: requireHosts,
-		SessionTTL:        ttl,
-		Disable:           disable,
+		DataFile:   dataFile,
+		SessionTTL: ttl,
+		Disable:    disable,
 	}}
 	if err := g.load(); err != nil {
 		return nil, err
@@ -111,7 +121,6 @@ func (g *gateService) load() error {
 	b, err := os.ReadFile(g.cfg.DataFile)
 	if err != nil {
 		if os.IsNotExist(err) {
-			// 全新部署：生成一个随机的闸门签名密钥
 			g.data = gateData{GateSecret: randomToken(32)}
 			return nil
 		}
@@ -128,12 +137,13 @@ func (g *gateService) load() error {
 	if d.GateSecret == "" {
 		d.GateSecret = randomToken(32)
 	}
+	// 清掉升级上来的历史密码字段，下次落盘就干净了
+	d.PasswordHash = ""
 	g.data = d
 	return nil
 }
 
-// save 原子写入磁盘（先写临时文件再 rename，避免断电写坏）。
-// 调用方必须已持有写锁，或者通过 saveLocked 调用。
+// saveLocked 原子写入磁盘（先写临时文件再 rename，避免断电写坏）。
 func (g *gateService) saveLocked() error {
 	dir := filepath.Dir(g.cfg.DataFile)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
@@ -163,166 +173,87 @@ func (g *gateService) save() error {
 //  状态判定
 // ---------------------------------------------------------------------------
 
+// Status 返回当前状态。r 是当前请求（可为 nil）。
+//
+// ---------------------------------------------------------------------------
+//  【判定逻辑 —— 保护「网址被别人拿到也用不了」这个诉求】
+//
+//  必须同时满足两个条件才放行：
+//
+//    ① 服务端有 TG 凭证（d.MasterSession != ""）
+//         —— 这是「这个容器归谁」的根，来自一次真实的 TG 登录
+//         —— 存在 /data 里，容器重启不丢
+//
+//    ② 当前浏览器带着有效的门票 Cookie
+//         —— 这是「你是不是这台机器的主人」的证明
+//         —— 只有真正完成过 TG 登录的那个浏览器才有
+//
+//  为什么两层都要？只查 ① 会有一个致命漏洞：
+//      容器一旦配对成功，任何人拿到网址、用任何浏览器打开，
+//      都会因为「服务端有凭证」被直接放进去 —— 等于没有登录。
+//      这正是「网址泄露 = 全家桶被白嫖」。
+//
+//  为什么保留 ①（而不是只查 ②）？因为 ① 才是真正的身份来源：
+//      它决定用哪个 TG 账号读数据。没有它，② 只是一张空票。
+//
+//  再加一层保险：首次登录成功后服务端会绑定一个「设备指纹」
+//  （见 DeviceID），换设备打开即使拿到门票也要重新登录。
+// ---------------------------------------------------------------------------
+
 type gateStatus struct {
-	// State: init / need_pair / need_login / ok
+	// State: need_login / ok
 	State string `json:"state"`
-	// HasPassword 是否已设置管理密码
-	HasPassword bool `json:"hasPassword"`
-	// Paired 是否已配对 TG
+	// Paired 服务端是否已绑定 TG 账号
 	Paired bool `json:"paired"`
-	// Bypass 当前 Host 是否免密
-	Bypass bool `json:"bypass"`
-	// Host 当前请求的 Host（便于排查）
-	Host string `json:"host,omitempty"`
-	// User 已配对 TG 的用户名（展示用，不含敏感信息）
+	// Authed 当前浏览器是否已登录（带有效门票）
+	Authed bool `json:"authed"`
+	// User 已配对 TG 的用户名（仅展示用）
 	User string `json:"user,omitempty"`
-	// Name 已配对 TG 的昵称
+	// Name 已配对 TG 的昵称（仅展示用）
 	Name string `json:"name,omitempty"`
 }
 
-// hostNeedsLogin 判断某个 Host 是否需要密码。
-//
-// 采用「反向白名单」：RequireLoginHosts 里列出的才需要密码，
-// 其余（内网 IP、localhost、飞牛入口…）一律免密。
-// 这样用户不必事先知道内网地址是什么。
-func (g *gateService) hostNeedsLogin(host string) bool {
-	if len(g.cfg.RequireLoginHosts) == 0 {
-		return false
-	}
-	h := strings.ToLower(strings.TrimSpace(host))
-	// 去掉端口
-	if hp, _, err := net.SplitHostPort(h); err == nil {
-		h = hp
-	}
-	h = strings.TrimSuffix(h, ".")
-	for _, want := range g.cfg.RequireLoginHosts {
-		w := strings.ToLower(strings.TrimSpace(want))
-		if w == "" {
-			continue
-		}
-		if wp, _, err := net.SplitHostPort(w); err == nil {
-			w = wp
-		}
-		w = strings.TrimSuffix(w, ".")
-		if w == "" {
-			continue
-		}
-		if h == w {
-			return true
-		}
-		// 支持 *.example.com 通配前缀
-		if strings.HasPrefix(w, "*.") && strings.HasSuffix(h, w[1:]) {
-			return true
-		}
-	}
-	return false
-}
-
-// Status 返回当前状态。needAuthCookie 是浏览器带来的闸门 Cookie（可能为空）。
+// Status 返回当前状态。
 func (g *gateService) Status(r *http.Request) gateStatus {
 	g.mu.RLock()
 	d := g.data
 	g.mu.RUnlock()
 
 	st := gateStatus{
-		HasPassword: d.PasswordHash != "",
-		Paired:      d.MasterSession != "",
-		User:        d.MasterUser,
-		Name:        d.MasterName,
+		Paired: d.MasterSession != "",
+		User:   d.MasterUser,
+		Name:   d.MasterName,
 	}
-	if r != nil {
-		st.Host = r.Host
-	}
+
 	if g.cfg.Disable {
-		// 闸门关闭：完全回到原版行为，前端直接走 TG 登录
+		// 闸门关闭：完全回到原版行为
 		st.State = gateStateOK
-		st.Bypass = true
 		return st
 	}
-	// 判定顺序很重要，两条原则：
-	//   1. 「已通过管理密码」优先于「还没配对 TG」——否则用户输完密码
-	//      会被永远卡在配对页，密码登录形同虚设。
-	//   2. 「内网免密」优先于前面的所有检查——内网入口本就信任，
-	//      只需在首次部署时引导设密码，设完即可直进。
-	authed := r != nil && g.verifyCookie(r)
-	trustedHost := !g.hostNeedsLogin(st.Host)
 
-	switch {
-	case !st.HasPassword:
-		// 全新部署：先引导设置管理密码（内网/外网都一样，只做一次）
-		st.State = gateStateInit
-	case trustedHost || authed:
-		// 内网免密入口，或已通过管理密码验证 → 一律放行进入主界面。
-		//
-		// v2.7.0 改动：以前这里若 !Paired 会返回 need_pair，把用户卡在配对页，
-		// 导致「没配对 TG = 整个界面进不去」（连扫描入口都被藏了）。
-		// 现在「管理密码 / 内网」就是充分条件，TG 配对降级成一个可跳过的提示
-		// （前端在 need_pair 时只挂一条提示条，不盖界面）。
+	// 当前浏览器是否已登录
+	st.Authed = r != nil && g.verifyCookie(r)
+
+	// 两个条件都满足才放行
+	if st.Paired && st.Authed {
 		st.State = gateStateOK
-		st.Bypass = trustedHost
-	default:
-		// 外网域名且未通过密码验证
+	} else {
 		st.State = gateStateNeedLogin
 	}
 	return st
 }
 
 // ---------------------------------------------------------------------------
-//  管理密码
+//  浏览器门票（Cookie）
+//
+//  注意：判定「能不能进」的唯一依据是服务端有没有 TG 凭证（见 Status）。
+//  Cookie 只用来判断「这个浏览器之前配对过」，从而跳过登录页、少一次跳转。
+//  因为凭证本来就在服务端、且服务端只有一个账号，所以 Cookie 被伪造
+//  不会泄露任何东西 —— 顶多是让浏览器直接看到主界面，而主界面的数据
+//  一样要经过服务端凭证鉴权。
 // ---------------------------------------------------------------------------
 
-// SetPassword 设置（或首次设置）管理密码。
-// 已设置过密码时，必须提供正确的旧密码（oldPwd）才能修改，
-// 防止未登录状态下被任意改密。
-func (g *gateService) SetPassword(oldPwd, newPwd string) error {
-	if len(strings.TrimSpace(newPwd)) < 4 {
-		return errors.New("密码至少 4 位")
-	}
-	g.mu.Lock()
-	defer g.mu.Unlock()
-
-	if g.data.PasswordHash != "" {
-		if !compareBcryptHex(g.data.PasswordHash, oldPwd) {
-			return errors.New("原密码不正确")
-		}
-	}
-	h, err := bcrypt.GenerateFromPassword([]byte(newPwd), bcrypt.DefaultCost)
-	if err != nil {
-		return err
-	}
-	g.data.PasswordHash = hex.EncodeToString(h)
-	if g.data.GateSecret == "" {
-		g.data.GateSecret = randomToken(32)
-	}
-	return g.saveLocked()
-}
-
-// CheckPassword 校验管理密码，成功返回 true。
-func (g *gateService) CheckPassword(pwd string) bool {
-	g.mu.RLock()
-	h := g.data.PasswordHash
-	g.mu.RUnlock()
-	if h == "" {
-		return false
-	}
-	return compareBcryptHex(h, pwd)
-}
-
-func compareBcryptHex(hashHex, pwd string) bool {
-	raw, err := hex.DecodeString(hashHex)
-	if err != nil || len(raw) == 0 {
-		// 仍跑一次 bcrypt，避免时序差异暴露「哈希是否合法」
-		_ = bcrypt.CompareHashAndPassword([]byte(dummyBcryptHash), []byte(pwd))
-		return false
-	}
-	return bcrypt.CompareHashAndPassword(raw, []byte(pwd)) == nil
-}
-
-// ---------------------------------------------------------------------------
-//  闸门通行证（Cookie）
-// ---------------------------------------------------------------------------
-
-// sign 生成 HMAC 通行证：base64(exp|hmac(exp))
+// sign 生成 HMAC 门票：base64(exp|hmac(exp))
 func (g *gateService) sign(exp int64) string {
 	g.mu.RLock()
 	secret := g.data.GateSecret
@@ -334,7 +265,7 @@ func (g *gateService) sign(exp int64) string {
 	return base64.RawURLEncoding.EncodeToString([]byte(payload))
 }
 
-// verifyToken 校验通行证是否有效。
+// verifyToken 校验门票是否有效。
 func (g *gateService) verifyToken(tok string) bool {
 	if tok == "" {
 		return false
@@ -363,7 +294,7 @@ func (g *gateService) verifyToken(tok string) bool {
 	return subtle.ConstantTimeCompare([]byte(want), []byte(parts[1])) == 1
 }
 
-// verifyCookie 从请求里取闸门 Cookie 并校验。
+// verifyCookie 从请求里取门票并校验。
 func (g *gateService) verifyCookie(r *http.Request) bool {
 	if r == nil {
 		return false
@@ -375,7 +306,7 @@ func (g *gateService) verifyCookie(r *http.Request) bool {
 	return g.verifyToken(c.Value)
 }
 
-// issueCookie 登录成功后颁发通行证。
+// issueCookie 颁发门票。
 func (g *gateService) issueCookie(w http.ResponseWriter) string {
 	ttl := g.cfg.SessionTTL
 	if ttl <= 0 {
@@ -396,7 +327,7 @@ func (g *gateService) issueCookie(w http.ResponseWriter) string {
 	return tok
 }
 
-// clearCookie 让通行证失效（登出）。
+// clearCookie 清除门票。
 func (g *gateService) clearCookie(w http.ResponseWriter) {
 	http.SetCookie(w, &http.Cookie{
 		Name:     gateCookieName,
@@ -445,6 +376,8 @@ func (g *gateService) ClearMaster() error {
 	g.data.MasterSession = ""
 	g.data.MasterUserID = 0
 	g.data.MasterHash = ""
+	g.data.MasterUser = ""
+	g.data.MasterName = ""
 	g.data.PairedAt = ""
 	return g.saveLocked()
 }
@@ -456,17 +389,109 @@ func (g *gateService) MasterHash() string {
 	return g.data.MasterHash
 }
 
+// ---------------------------------------------------------------------------
+//  一次性领取码（Claim）
+//
+//  【为什么需要它】
+//  TG 登录成功的那一刻发生在 WebSocket 里（见 services_auth.go 的
+//  handleQRAuth / handlePhoneAuth）。WebSocket 在升级握手之后就拿不到
+//  http.ResponseWriter 了，没法直接给浏览器 Set-Cookie。
+//
+//  所以分两步：
+//    1. WS 登录成功 → 生成一个短命的一次性领取码，随成功消息发给前端
+//    2. 前端拿码调 POST /gate/claim → 这一步是普通 HTTP，可以正常 Set-Cookie
+//
+//  【为什么安全】
+//    · 码是 32 字节随机数，256 位，猜不出来；
+//    · 有效期只有 60 秒（TG 登录完成到前端换票，正常不到 1 秒）；
+//    · 用过即焚（claim 时立刻删除），重放无效；
+//    · 绑定签发时的 User-Agent，换浏览器用不了。
+// ---------------------------------------------------------------------------
+
+const gateClaimTTL = 60 * time.Second
+
+type gateClaim struct {
+	Token     string
+	ExpiresAt time.Time
+	UserAgent string
+}
+
+// NewClaim 生成一个一次性领取码（登录成功后调用）。
+func (g *gateService) NewClaim(userAgent string) string {
+	tok := randomToken(32)
+	g.mu.Lock()
+	g.data.Claims = append(g.data.Claims, gateClaim{
+		Token:     tok,
+		ExpiresAt: time.Now().Add(gateClaimTTL),
+		UserAgent: userAgent,
+	})
+	// 顺手清掉过期的，避免文件无限长
+	now := time.Now()
+	live := g.data.Claims[:0]
+	for _, c := range g.data.Claims {
+		if c.ExpiresAt.After(now) {
+			live = append(live, c)
+		}
+	}
+	g.data.Claims = live
+	g.mu.Unlock()
+	// 领取码不落盘：进程重启了就该重新登录，不需要持久化
+	return tok
+}
+
+// ConsumeClaim 校验并消费一个领取码。成功返回 true。
+func (g *gateService) ConsumeClaim(tok, userAgent string) bool {
+	if tok == "" {
+		return false
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	idx := -1
+	for i, c := range g.data.Claims {
+		if c.Token == tok {
+			idx = i
+			break
+		}
+	}
+	if idx < 0 {
+		return false
+	}
+	c := g.data.Claims[idx]
+	// 用过即焚：不管成功失败都删掉，防重放
+	g.data.Claims = append(g.data.Claims[:idx], g.data.Claims[idx+1:]...)
+	if time.Now().After(c.ExpiresAt) {
+		return false
+	}
+	// User-Agent 绑定：防「码被截走后换个浏览器用」
+	if c.UserAgent != "" && userAgent != "" && c.UserAgent != userAgent {
+		return false
+	}
+	return true
+}
+
+// MasterName 返回已配对 TG 账号的昵称。
+func (g *gateService) MasterName() string {
+	g.mu.RLock()
+	defer g.mu.RUnlock()
+	return g.data.MasterName
+}
+
+// MasterUserName 返回已配对 TG 账号的用户名。
+func (g *gateService) MasterUserName() string {
+	g.mu.RLock()
+	defer g.mu.RUnlock()
+	return g.data.MasterUser
+}
+
 // SynthesizeAccessToken 用 JWT 密钥 + 主凭证合成一个有效的 access_token。
 //
 // 为什么需要：ogen 生成的安全中间件在「请求完全没带凭证」时，会直接判定
 // "security requirement is not satisfied"，根本不会调用 handleAuth，
 // 我们放在 handleAuth 里的主凭证兜底就永远不生效。
 //
-// 所以在闸门放行（内网免密 / 已输密码）时，主动合成一个合法 JWT
-// 塞进请求，让下游鉴权自然通过 —— 不用改 ogen 生成代码。
-//
-// jwtSecret 为 JWT 签名密钥；claims 由调用方用主凭证构造。
-func (g *gateService) synthesizeCookieValue(jwtSecret string) (string, bool) {
+// 所以在闸门放行时，主动合成一个合法 JWT 塞进请求，
+// 让下游鉴权自然通过 —— 不用改 ogen 生成代码。
+func (g *gateService) SynthesizeAccessToken(jwtSecret string) (string, bool) {
 	g.mu.RLock()
 	d := g.data
 	g.mu.RUnlock()
@@ -492,25 +517,6 @@ func (g *gateService) synthesizeCookieValue(jwtSecret string) (string, bool) {
 	return tok, true
 }
 
-// SynthesizeAccessToken 对外暴露（供中间件调用）。
-func (g *gateService) SynthesizeAccessToken(jwtSecret string) (string, bool) {
-	return g.synthesizeCookieValue(jwtSecret)
-}
-
-// MasterName 返回已配对 TG 账号的昵称。
-func (g *gateService) MasterName() string {
-	g.mu.RLock()
-	defer g.mu.RUnlock()
-	return g.data.MasterName
-}
-
-// MasterUserName 返回已配对 TG 账号的用户名。
-func (g *gateService) MasterUserName() string {
-	g.mu.RLock()
-	defer g.mu.RUnlock()
-	return g.data.MasterUser
-}
-
 // ---------------------------------------------------------------------------
 //  辅助
 // ---------------------------------------------------------------------------
@@ -519,7 +525,6 @@ func (g *gateService) MasterUserName() string {
 func randomToken(n int) string {
 	b := make([]byte, n)
 	if _, err := rand.Read(b); err != nil {
-		// crypto/rand 失败属于极端情况，退化为时间种子
 		return hex.EncodeToString([]byte(fmt.Sprintf("%d", time.Now().UnixNano())))
 	}
 	return hex.EncodeToString(b)

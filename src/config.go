@@ -48,30 +48,41 @@ type EventConfig struct {
 	DeduplicationTTL time.Duration `default:"5s" description:"Event deduplication time-to-live"`
 }
 
-// GateConfig 控制「TGPan 自有登录」（俗称闸门 / gate）。
+// GateConfig 控制「TGPan 登录」（俗称闸门 / gate）。
 //
-// 设计背景：TG 的扫码 / 验证码登录在很多场景下不可用（手机无法扫自己的码、
-// 某些客户端收不到验证码）。因此把「TG 配对」与「日常进入」彻底解耦：
+// 设计：登录就是登 TG，一步到位。
 //
-//	TG 配对  —— 只做一次，成功后主凭证落盘到 DataFile。
-//	日常进入 —— 用 TGPan 自己的管理密码（或内网免密）。
+//	第一次打开网页 → 扫码或手机验证码登 TG（只做一次）
+//	之后           → 凭证在服务端，浏览器留一张门票，直接进
 //
-// DataFile 存两样东西：管理密码哈希 + TG 主凭证。
-// 放在 /data 目录下，容器重启 / 重建都不会丢。
+// 两道校验（缺一不可）：
+//
+//	服务端凭证  —— TG session，落在 DataFile，决定用哪个账号读数据
+//	浏览器门票  —— 一次性领取码换来的签名 Cookie，证明"这个浏览器是主人"
+//
+// 为什么两道都要：只查服务端凭证的话，容器一旦登录过，任何人拿到
+// 网址用任意浏览器打开都会被直接放进去 —— 等于没有登录。
+//
+// 没有管理密码、不看 Host、不分内外网（这些设计都试过，全都翻过车，
+// 原因写在 gate.go / tgpan-gate.js 的文件头注释里）。
 type GateConfig struct {
-	// DataFile 闸门数据文件路径（管理密码哈希 + TG 主凭证）
-	DataFile string `default:"/data/tgpan-gate.json" description:"Gate data file: admin password hash and TG master credentials"`
+	// DataFile 闸门数据文件路径（TG 主凭证 + Cookie 签名密钥）
+	DataFile string `default:"/data/tgpan-gate.json" description:"Gate data file: TG master credentials and cookie signing secret"`
 
-	// RequireLoginHosts 需要登录的 Host 白名单。
-	// 约定：凡是 Request.Host（去掉端口）命中此列表的，必须输入管理密码；
-	// 其余 Host（内网地址、localhost、飞牛 OS 入口等）一律免密放行。
+	// RequireLoginHosts 【已废弃，保留仅为兼容旧配置文件】
 	//
-	// 注意这里是「反向白名单」：列出来的是「要登录的」，不是「免登录的」。
-	// 目的是无需事先知道内网 IP 是多少，默认放行内网，只锁死对外域名。
-	RequireLoginHosts []string `default:"pan.2016.de5.net" description:"Hosts that REQUIRE the admin password (usually the public domain); all other hosts bypass login"`
+	// 早期版本用它做「反向白名单」（列出的 Host 才要密码）。问题：
+	//   1. 默认值硬编码了作者自己的域名，别人部署时永远匹配不上
+	//      → 所有访问都免密直进，设密码形同虚设；
+	//   2. 依赖 Request.Host，而反代会改写 Host，判断不可靠。
+	//
+	// 现在统一要求登录，不看 Host。这个字段读到就忽略，不会报错。
+	//
+	// Deprecated: has no effect.
+	RequireLoginHosts []string `description:"Deprecated: ignored. Login is always required."`
 
-	// SessionTTL 管理密码登录后颁发的通行证有效期
-	SessionTTL time.Duration `default:"30d" description:"Gate session validity duration"`
+	// SessionTTL 浏览器门票的有效期
+	SessionTTL time.Duration `default:"30d" description:"Gate session (browser ticket) validity duration"`
 
 	// Disable 彻底关闭闸门（回到原版行为：只有 TG 扫码）
 	Disable bool `default:"false" description:"Disable the gate entirely and fall back to Telegram-only login"`

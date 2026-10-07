@@ -202,6 +202,12 @@ func (e *extendedService) AuthWs(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
+	// 记录发起这次登录的浏览器标识。
+	//
+	// 用途：登录成功后签发的一次性领取码会绑定这个 UA，
+	// 防止「码被截走后换个浏览器换票」。
+	userAgent := r.Header.Get("User-Agent")
+
 	upgrader := websocket.Upgrader{
 		CheckOrigin: func(r *http.Request) bool {
 			return true
@@ -291,12 +297,12 @@ func (e *extendedService) AuthWs(w http.ResponseWriter, r *http.Request) {
 			// 一律交给 handler 处理（不拦截）
 			switch message.AuthType {
 			case "qr":
-				go e.handleQRAuth(ctx, conn, tgClient, loggedIn, sessionStorage, logger)
+				go e.handleQRAuth(ctx, conn, tgClient, loggedIn, sessionStorage, logger, userAgent)
 			case "phone":
-				go e.handlePhoneAuth(ctx, conn, tgClient, message, sessionStorage, logger)
+				go e.handlePhoneAuth(ctx, conn, tgClient, message, sessionStorage, logger, userAgent)
 			case "2fa":
 				if message.Password != "" {
-					go e.handle2FAAuth(ctx, conn, tgClient, message.Password, sessionStorage, logger)
+					go e.handle2FAAuth(ctx, conn, tgClient, message.Password, sessionStorage, logger, userAgent)
 				}
 			}
 		}
@@ -334,7 +340,7 @@ func (e *extendedService) AuthWs(w http.ResponseWriter, r *http.Request) {
 	<-ctx.Done()
 }
 
-func (e *extendedService) handleQRAuth(ctx context.Context, conn *websocket.Conn, tgClient *telegram.Client, loggedIn qrlogin.LoggedIn, sessionStorage session.Storage, logger *zap.Logger) {
+func (e *extendedService) handleQRAuth(ctx context.Context, conn *websocket.Conn, tgClient *telegram.Client, loggedIn qrlogin.LoggedIn, sessionStorage session.Storage, logger *zap.Logger, userAgent string) {
 	authorization, err := tgClient.QR().Auth(ctx, loggedIn, func(ctx context.Context, token qrlogin.Token) error {
 		conn.WriteJSON(map[string]any{"type": "auth", "payload": map[string]string{"token": token.URL()}})
 		return nil
@@ -367,13 +373,24 @@ func (e *extendedService) handleQRAuth(ctx context.Context, conn *websocket.Conn
 	sessionData := &types.SessionData{}
 	json.Unmarshal(res, sessionData)
 	session := prepareSession(user, &sessionData.Data)
-	// 配对成功 → 把 TG 主凭证落盘到 /data，
-	// 这样以后内网入口免密、域名入口只用管理密码，都不必再扫码。
-	e.persistMasterSession(ctx, session, logger)
-	conn.WriteJSON(map[string]any{"type": "auth", "payload": session, "message": "success"})
+	// 登录成功 → 落盘主凭证，并给这个浏览器发一张一次性领取码。
+	//
+	// 为什么要发领取码：WebSocket 升级握手后就拿不到 ResponseWriter 了，
+	// 没法在这里 Set-Cookie。前端拿码去调 POST /gate/claim 换门票 ——
+	// 那一步是普通 HTTP，能正常写 Cookie。
+	//
+	// 这一步不能省：不加的话，任何知道网址的人都会因为「服务端有凭证」
+	// 被直接放进去，等于没有登录。
+	claim := e.persistMasterSession(ctx, session, logger, userAgent)
+	conn.WriteJSON(map[string]any{
+		"type":    "auth",
+		"payload": session,
+		"message": "success",
+		"claim":   claim,
+	})
 }
 
-func (e *extendedService) handlePhoneAuth(ctx context.Context, conn *websocket.Conn, tgClient *telegram.Client, message *types.SocketMessage, sessionStorage session.Storage, logger *zap.Logger) {
+func (e *extendedService) handlePhoneAuth(ctx context.Context, conn *websocket.Conn, tgClient *telegram.Client, message *types.SocketMessage, sessionStorage session.Storage, logger *zap.Logger, userAgent string) {
 	switch message.Message {
 	case "sendcode":
 		recordAuthEvent("info", "开始请求验证码",
@@ -469,13 +486,18 @@ func (e *extendedService) handlePhoneAuth(ctx context.Context, conn *websocket.C
 		sessionData := &types.SessionData{}
 		json.Unmarshal(res, sessionData)
 		session := prepareSession(user, &sessionData.Data)
-		// 验证码配对成功 → 同样落盘主凭证
-		e.persistMasterSession(ctx, session, logger)
-		conn.WriteJSON(map[string]any{"type": "auth", "payload": session, "message": "success"})
+		// 验证码登录成功 → 同样落盘主凭证 + 发领取码
+		claim := e.persistMasterSession(ctx, session, logger, userAgent)
+		conn.WriteJSON(map[string]any{
+			"type":    "auth",
+			"payload": session,
+			"message": "success",
+			"claim":   claim,
+		})
 	}
 }
 
-func (e *extendedService) handle2FAAuth(ctx context.Context, conn *websocket.Conn, tgClient *telegram.Client, password string, sessionStorage session.Storage, logger *zap.Logger) {
+func (e *extendedService) handle2FAAuth(ctx context.Context, conn *websocket.Conn, tgClient *telegram.Client, password string, sessionStorage session.Storage, logger *zap.Logger, userAgent string) {
 	auth, err := tgClient.Auth().Password(ctx, password)
 	if errors.Is(err, context.Canceled) {
 		return
@@ -499,10 +521,21 @@ func (e *extendedService) handle2FAAuth(ctx context.Context, conn *websocket.Con
 	sessionData := &types.SessionData{}
 	json.Unmarshal(res, sessionData)
 	session := prepareSession(user, &sessionData.Data)
-	// 配对成功 → 把 TG 主凭证落盘到 /data，
-	// 这样以后内网入口免密、域名入口只用管理密码，都不必再扫码。
-	e.persistMasterSession(ctx, session, logger)
-	conn.WriteJSON(map[string]any{"type": "auth", "payload": session, "message": "success"})
+	// 登录成功 → 落盘主凭证，并给这个浏览器发一张一次性领取码。
+	//
+	// 为什么要发领取码：WebSocket 升级握手后就拿不到 ResponseWriter 了，
+	// 没法在这里 Set-Cookie。前端拿码去调 POST /gate/claim 换门票 ——
+	// 那一步是普通 HTTP，能正常写 Cookie。
+	//
+	// 这一步不能省：不加的话，任何知道网址的人都会因为「服务端有凭证」
+	// 被直接放进去，等于没有登录。
+	claim := e.persistMasterSession(ctx, session, logger, userAgent)
+	conn.WriteJSON(map[string]any{
+		"type":    "auth",
+		"payload": session,
+		"message": "success",
+		"claim":   claim,
+	})
 }
 
 func ip4toInt(ipv4Address net.IP) int64 {
@@ -614,16 +647,20 @@ func cookieSameSiteMode() http.SameSite {
 	}
 }
 
-// persistMasterSession 把扫码/验证码配对成功后的 TG 凭证写入闸门数据文件。
+// persistMasterSession 把 TG 主凭证落盘到 /data，并返回一张
+// 供当前浏览器换门票的一次性领取码（失败时返回空串）。
 //
-// 为什么要这一步：TG 的主凭证是「服务端资产」，不该随浏览器 Cookie 生死。
-// 落盘之后：
-//   - 飞牛 OS 内网入口 → 免密直进
-//   - 对外域名入口     → 只要管理密码，不必再扫码
-func (e *extendedService) persistMasterSession(ctx context.Context, session *api.SessionCreate, logger *zap.Logger) {
+// 为什么凭证要落盘（而不是只放浏览器 Cookie）：
+//   TG session 是账号密钥，是「服务端资产」。放 Cookie 等于把账号密钥
+//   交给客户端，且每次请求都要带着走。落盘到 /data 之后容器重启不丢，
+//   用户不用每次重启都重新扫码。
+//
+// 【返回值为什么不能忽略】调用方（WS handler）要把这个码发给前端；
+// 前端靠它调 /gate/claim 拿到浏览器门票。没有门票 = 进不去。
+func (e *extendedService) persistMasterSession(ctx context.Context, session *api.SessionCreate, logger *zap.Logger, userAgent string) string {
 	g := e.gate()
 	if g == nil || session == nil || session.Session == "" {
-		return
+		return ""
 	}
 	tokenhash := md5.Sum([]byte(session.Session))
 	hexToken := hex.EncodeToString(tokenhash[:])
@@ -631,11 +668,14 @@ func (e *extendedService) persistMasterSession(ctx context.Context, session *api
 		if logger != nil {
 			logger.Error("gate.persist_master_failed", zap.Error(err))
 		}
-		return
+		return ""
 	}
 	if logger != nil {
 		logger.Info("gate.persist_master_ok",
 			zap.Int64("userId", session.UserId),
 			zap.String("user", session.UserName))
 	}
+	// 发一张领取码，让「刚刚登录的那个浏览器」能换到门票。
+	// 码本身不落盘、60 秒过期、用过即焚。
+	return g.NewClaim(userAgent)
 }

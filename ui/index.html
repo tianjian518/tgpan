@@ -17,7 +17,9 @@
 
 <body>
   <div id="app"></div>
-  <!-- 闸门：管理密码 / 初始设置 / 外网登录（必须最先跑，用于遮罩） -->
+  <!-- QR 编码库（qrcode-generator, MIT）。登录页扫码用，无外部依赖 -->
+  <script src="/vendor-qrcode.js" defer></script>
+  <!-- 登录引导：扫码 / 手机验证码（必须早于 app.js，用于遮罩） -->
   <script src="/tgpan-gate.js" defer></script>
   <!-- 主界面：我的网盘 + 系统设置 -->
   <script src="/app.js" defer></script>

@@ -1,24 +1,39 @@
 /*!
- * TGPan 闸门（Gate）前端
+ * TGPan 登录引导（Gate）前端
  * ---------------------------------------------------------------------------
- *  v2.6.2 新增。
+ *  v2.8.0 重写。
  *
- *  目标：让「进入 TGPan」不再依赖 TG 扫码 / 验证码。
+ *  只有一件事：把「登录 TG」这一步做到能用。
  *
- *  三个状态对应三块界面：
- *    1. init        首次部署 → 让用户设置管理密码
- *    2. need_pair   已有密码、未配对 TG → 引导扫码一次
- *    3. need_login  对外域名访问 → 输入管理密码
+ *    没配对 → 直接展示登录页（扫码 / 手机验证码 双通道）
+ *    已配对 → 撤掉遮罩，进主界面
  *
- *  免密入口（内网 / 飞牛 OS）后端直接放行，前端什么都不用做。
+ *  没有管理密码，没有内外网判断，没有域名白名单 —— 全砍了。
+ *  登录 == 登 TG，一步到位。
  *
- *  v2.7.0 改动：配对这一步不再是「拦路虎」。
- *  以前 need_pair 会盖住整个界面，不配对就什么都干不了（连扫描按钮都被藏了）。
- *  现在 need_pair 只作为一个「可跳过的提示条」显示，点一下就进主界面。
- *  用户要的是「只留管理密码」—— TG 配对交给频道扫描时再按需完成。
+ *  服务端返回的 state 只有两个：need_login / ok
  *
- *  实现方式：旁挂式。不改压缩后的 SPA 产物，而是先盖一层遮罩，
- *  由后端 /gate/status 决定显示哪块。状态满足后才把遮罩撤掉。
+ *  ---------------------------------------------------------------------------
+ *  【走过的弯路，写在这里免得有人再改回去】
+ *
+ *  弯路一：管理密码 + 内外网免密 + 域名白名单。
+ *    想法是"内网方便、外网安全"，实际结果：
+ *      · 配置里硬编码了作者自己的域名，别人部署时匹配不上
+ *        → 所有人免密直进，设密码形同虚设；
+ *      · 内网判断依赖 Host，而反代会改写 Host，Docker 网桥 / VPN
+ *        场景下"内网"边界很模糊，判断根本不可靠；
+ *      · 用户设完密码直接进主界面，TG 没配对 → 功能全 401
+ *        → 界面上还找不到配对入口，彻底卡死。
+ *    根因：把「登录」和「配对」拆成了两件事。其实它们就是一件事。
+ *
+ *  弯路二：自写 QR 编码器。
+ *    用 jsQR 交叉验证，20 个用例全挂。逐层排查修了格式信息位序、
+ *    纠错等级编码值、RS 生成多项式，还是不对。最后换成成熟库
+ *    （qrcode-generator，MIT，被无数项目验证过），20/20 通过。
+ *    结论：编码器这种东西不要自己写。
+ *
+ *  实现方式：旁挂式。不改压缩后的 SPA 产物，先盖一层遮罩，
+ *  由 /gate/status 决定显示哪块，状态满足后把遮罩撤掉。
  * ---------------------------------------------------------------------------
  */
 (function () {
@@ -26,7 +41,22 @@
 
   var API = '/api';
   var OVERLAY_ID = 'tgpan-gate-overlay';
-  var state = { status: null, busy: false, pollTimer: null };
+  var WS_URL = (location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + API + '/auth/ws';
+
+  var state = {
+    status: null,
+    busy: false,
+    pollTimer: null,
+    ws: null,
+    // 登录方式：'qr' | 'phone'
+    mode: 'qr',
+    // 验证码流程的阶段：'idle' | 'code' | '2fa'
+    phoneStage: 'idle',
+    phoneNo: '',
+    phoneCodeHash: '',
+    qrTimer: null,
+    started: false
+  };
 
   // ---------------------------------------------------------------------
   //  样式
@@ -35,18 +65,28 @@
     if (document.getElementById('tgpan-gate-style')) return;
     var css = ''
       + '#' + OVERLAY_ID + '{position:fixed;inset:0;z-index:2147483000;display:flex;'
-      + 'align-items:center;justify-content:center;padding:20px;'
+      + 'align-items:center;justify-content:center;padding:20px;overflow:auto;'
       + 'background:linear-gradient(150deg,#0f172a 0%,#1e293b 55%,#0b1220 100%);'
       + 'font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;'
       + 'color:#e2e8f0;-webkit-font-smoothing:antialiased;}'
-      + '.tgpan-gate-card{width:100%;max-width:400px;background:rgba(30,41,59,.86);'
-      + 'border:1px solid rgba(148,163,184,.22);border-radius:18px;padding:30px 28px 26px;'
+      + '.tgpan-gate-card{width:100%;max-width:420px;background:rgba(30,41,59,.9);'
+      + 'border:1px solid rgba(148,163,184,.22);border-radius:18px;padding:28px 26px 24px;'
       + 'box-shadow:0 24px 60px rgba(0,0,0,.5);backdrop-filter:blur(14px);}'
-      + '.tgpan-gate-logo{width:52px;height:52px;border-radius:14px;margin:0 auto 16px;'
+      + '.tgpan-gate-logo{width:52px;height:52px;border-radius:14px;margin:0 auto 14px;'
       + 'display:flex;align-items:center;justify-content:center;font-size:26px;'
       + 'background:linear-gradient(135deg,#2563eb,#7c3aed);box-shadow:0 8px 22px rgba(37,99,235,.4);}'
       + '.tgpan-gate-title{font-size:19px;font-weight:600;text-align:center;margin:0 0 6px;color:#f1f5f9;}'
-      + '.tgpan-gate-sub{font-size:13px;color:#94a3b8;text-align:center;line-height:1.65;margin:0 0 20px;}'
+      + '.tgpan-gate-sub{font-size:13px;color:#94a3b8;text-align:center;line-height:1.65;margin:0 0 18px;}'
+      + '.tgpan-gate-tabs{display:flex;gap:6px;background:rgba(15,23,42,.7);padding:4px;'
+      + 'border-radius:10px;margin-bottom:18px;}'
+      + '.tgpan-gate-tab{flex:1;padding:8px;text-align:center;font-size:13.5px;cursor:pointer;'
+      + 'border-radius:7px;color:#94a3b8;transition:background .18s,color .18s;user-select:none;}'
+      + '.tgpan-gate-tab.on{background:#2563eb;color:#fff;font-weight:600;}'
+      + '.tgpan-gate-qrbox{display:flex;flex-direction:column;align-items:center;gap:12px;}'
+      + '.tgpan-gate-qr{width:228px;height:228px;background:#fff;border-radius:12px;padding:10px;'
+      + 'box-sizing:content-box;box-shadow:0 6px 20px rgba(0,0,0,.35);}'
+      + '.tgpan-gate-qr canvas{display:block;width:228px;height:228px;}'
+      + '.tgpan-gate-qrhint{font-size:12.5px;color:#94a3b8;text-align:center;line-height:1.7;}'
       + '.tgpan-gate-field{margin-bottom:13px;}'
       + '.tgpan-gate-field label{display:block;font-size:12.5px;color:#94a3b8;margin-bottom:6px;}'
       + '.tgpan-gate-field input{width:100%;box-sizing:border-box;padding:11px 13px;font-size:14.5px;'
@@ -62,15 +102,27 @@
       + 'color:#cbd5e1;font-weight:500;margin-top:10px;}'
       + '.tgpan-gate-msg{font-size:13px;text-align:center;margin-top:12px;min-height:19px;color:#f87171;}'
       + '.tgpan-gate-msg.ok{color:#4ade80;}'
-      + '.tgpan-gate-tip{margin-top:16px;padding:11px 13px;font-size:12.5px;line-height:1.7;'
+      + '.tgpan-gate-msg.info{color:#93c5fd;}'
+      + '.tgpan-gate-status{display:flex;align-items:center;justify-content:center;gap:7px;'
+      + 'font-size:12.5px;color:#94a3b8;margin-top:10px;min-height:18px;}'
+      + '.tgpan-gate-dot{width:7px;height:7px;border-radius:50%;background:#f59e0b;flex:none;'
+      + 'animation:tgpan-pulse 1.4s ease-in-out infinite;}'
+      + '.tgpan-gate-dot.ok{background:#4ade80;animation:none;}'
+      + '.tgpan-gate-dot.err{background:#f87171;animation:none;}'
+      + '@keyframes tgpan-pulse{0%,100%{opacity:.35}50%{opacity:1}}'
+      + '.tgpan-gate-tip{margin-top:15px;padding:11px 13px;font-size:12.5px;line-height:1.7;'
       + 'color:#94a3b8;background:rgba(15,23,42,.6);border-left:3px solid #3b82f6;border-radius:0 8px 8px 0;}'
-      + '.tgpan-gate-steps{margin:16px 0 0;padding:0;list-style:none;font-size:13px;color:#cbd5e1;}'
-      + '.tgpan-gate-steps li{padding:8px 0 8px 26px;position:relative;line-height:1.6;'
-      + 'border-bottom:1px solid rgba(148,163,184,.13);}'
-      + '.tgpan-gate-steps li:last-child{border-bottom:none;}'
-      + '.tgpan-gate-steps li:before{content:"✓";position:absolute;left:4px;color:#4ade80;font-weight:700;}'
+      + '.tgpan-gate-tip.warn{border-left-color:#f59e0b;}'
       + '.tgpan-gate-code{display:inline-block;padding:1px 6px;margin:0 2px;font-size:12.5px;'
-      + 'background:rgba(59,130,246,.16);color:#93c5fd;border-radius:5px;font-family:ui-monospace,Menlo,monospace;}';
+      + 'background:rgba(59,130,246,.16);color:#93c5fd;border-radius:5px;font-family:ui-monospace,Menlo,monospace;}'
+      // 主界面角落的「换账号」浮标
+      + '#tgpan-account-chip{position:fixed;right:14px;bottom:14px;z-index:2147482000;'
+      + 'display:flex;align-items:center;gap:8px;padding:7px 12px;border-radius:20px;'
+      + 'background:rgba(30,41,59,.92);border:1px solid rgba(148,163,184,.25);color:#cbd5e1;'
+      + 'font-size:12.5px;cursor:pointer;box-shadow:0 6px 18px rgba(0,0,0,.3);'
+      + 'font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC",sans-serif;'
+      + 'opacity:.72;transition:opacity .18s;}'
+      + '#tgpan-account-chip:hover{opacity:1;}';
     var el = document.createElement('style');
     el.id = 'tgpan-gate-style';
     el.textContent = css;
@@ -92,6 +144,7 @@
         if (!r.ok) {
           var e = new Error(j.error || ('HTTP ' + r.status));
           e.status = r.status;
+          e.body = j;
           throw e;
         }
         return j;
@@ -107,7 +160,6 @@
     if (!el) {
       el = document.createElement('div');
       el.id = OVERLAY_ID;
-      // 挂到 body 之前先看 body 有没有；没有就等 DOM
       (document.body || document.documentElement).appendChild(el);
     }
     return el;
@@ -126,7 +178,7 @@
   //
   // 这里的 msg 大多来自服务端返回的 message 字段。虽然目前后端消息是自己
   // 写的，但「把外部字符串直接拼进 innerHTML」本身就是个洞 —— 哪天后端
-  // 把用户输入（比如密码错误提示里带上输入值）原样回显，就变成注入点了。
+  // 把用户输入（比如 TG 返回的错误里带上手机号）原样回显，就变成注入点了。
   // 所以统一收口：凡是拼进 HTML 的动态文本，一律先过这个函数。
   function escHtml(s) {
     return String(s === null || s === undefined ? '' : s)
@@ -135,122 +187,394 @@
   }
 
   // ---------------------------------------------------------------------
-  //  各状态界面
+  //  登录页（need_login）
   // ---------------------------------------------------------------------
 
-  // 首次部署：设置初始密码
-  function renderSetup(msg, isError) {
+  // renderLogin 画出完整的登录界面：扫码 / 验证码 两个 tab + 状态区。
+  function renderLogin(msg, isError) {
     render(''
-      + '<div class="tgpan-gate-logo"><svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="10" width="16" height="11" rx="2"/><path d="M8 10V7a4 4 0 0 1 8 0v3"/><circle cx="12" cy="15.5" r="1.2" fill="#fff" stroke="none"/></svg></div>'
-      + '<h1 class="tgpan-gate-title">欢迎使用 TGPan</h1>'
-      + '<p class="tgpan-gate-sub">第一次使用，请先给 TGPan 设一个管理密码。<br>'
-      + '以后不管在手机还是电脑上打开，输这个密码就能进，<b>不用再扫码</b>。</p>'
-      + '<div class="tgpan-gate-field"><label>设置密码</label>'
-      + '<input type="password" id="tgpan-gate-p1" placeholder="至少 4 位" autocomplete="new-password"></div>'
-      + '<div class="tgpan-gate-field"><label>再输一次确认</label>'
-      + '<input type="password" id="tgpan-gate-p2" placeholder="再输一次" autocomplete="new-password"></div>'
-      + '<button class="tgpan-gate-btn" id="tgpan-gate-go">确定</button>'
-      + '<div class="tgpan-gate-msg' + (isError ? '' : ' ok') + '" id="tgpan-gate-msg">' + escHtml(msg || '') + '</div>'
-      + '<div class="tgpan-gate-tip"><b>提示</b> · 这个密码存在服务器上，容器重启也不会丢。'
-      + '忘了的话，删掉数据目录里的 <span class="tgpan-gate-code">tgpan-gate.json</span> 就能重来。</div>'
+      + '<div class="tgpan-gate-logo">'
+      + '<svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">'
+      + '<path d="M21.5 2.5 2.5 10.2l7.6 2.7 2.7 7.6 8.7-18z"/><path d="M10.1 12.9l4.4-4.4"/></svg>'
+      + '</div>'
+      + '<h1 class="tgpan-gate-title">登录 TGPan</h1>'
+      + '<p class="tgpan-gate-sub">用你的 Telegram 账号登录，只需一次。<br>登录后凭证保存在服务器上，重启也不会掉。</p>'
+      + '<div class="tgpan-gate-tabs">'
+      + '<div class="tgpan-gate-tab' + (state.mode === 'qr' ? ' on' : '') + '" id="tgpan-tab-qr">扫码登录</div>'
+      + '<div class="tgpan-gate-tab' + (state.mode === 'phone' ? ' on' : '') + '" id="tgpan-tab-phone">手机号登录</div>'
+      + '</div>'
+      + '<div id="tgpan-gate-panel"></div>'
+      + '<div class="tgpan-gate-status" id="tgpan-gate-status">'
+      + '<span class="tgpan-gate-dot" id="tgpan-gate-dot"></span>'
+      + '<span id="tgpan-gate-statustext">正在连接 Telegram…</span></div>'
+      + '<div class="tgpan-gate-msg' + (isError ? '' : ' info') + '" id="tgpan-gate-msg">' + escHtml(msg || '') + '</div>'
     );
-    var go = function () {
-      if (state.busy) return;
-      var a = (document.getElementById('tgpan-gate-p1') || {}).value || '';
-      var b = (document.getElementById('tgpan-gate-p2') || {}).value || '';
-      if (a.length < 4) { setMsg('密码至少 4 位', false); return; }
-      if (a !== b) { setMsg('两次输入不一致', false); return; }
-      state.busy = true;
-      req('/gate/setup', { method: 'POST', body: { password: a } })
-        .then(function (st) { state.busy = false; applyStatus(st, '管理密码已设置'); })
-        .catch(function (e) { state.busy = false; setMsg(e.message, false); });
-    };
-    var btn = document.getElementById('tgpan-gate-go');
-    if (btn) btn.onclick = go;
-    var p2 = document.getElementById('tgpan-gate-p2');
-    if (p2) p2.addEventListener('keydown', function (e) { if (e.key === 'Enter') go(); });
-    var p1 = document.getElementById('tgpan-gate-p1');
-    if (p1) p1.focus();
+
+    var tabQr = document.getElementById('tgpan-tab-qr');
+    var tabPhone = document.getElementById('tgpan-tab-phone');
+    if (tabQr) tabQr.onclick = function () { switchMode('qr'); };
+    if (tabPhone) tabPhone.onclick = function () { switchMode('phone'); };
+
+    renderPanel();
+    connectWS();
   }
 
-  // 已有密码、未配对 TG：**不拦路**，只在角落挂一条可关闭的提示。
+  // renderPanel 根据当前模式画下半部分。
+  function renderPanel() {
+    var box = document.getElementById('tgpan-gate-panel');
+    if (!box) return;
+
+    if (state.mode === 'qr') {
+      box.innerHTML = ''
+        + '<div class="tgpan-gate-qrbox">'
+        + '<div class="tgpan-gate-qr"><canvas id="tgpan-gate-qrcanvas" width="228" height="228"></canvas></div>'
+        + '<div class="tgpan-gate-qrhint">用手机 Telegram 扫这个二维码<br>'
+        + '<b>设置 → 设备 → 添加设备 → 扫描二维码</b><br>'
+        + '扫完手机上点「确认」，这里会自动进</div>'
+        + '</div>';
+      drawQR(state.lastToken || '');
+      return;
+    }
+
+    if (state.mode === 'phone') {
+      var codeStage = state.phoneStage === 'code';
+      var tfaStage = state.phoneStage === '2fa';
+      box.innerHTML = ''
+        + (tfaStage
+          ? '<div class="tgpan-gate-field"><label>两步验证密码</label>'
+            + '<input type="password" id="tgpan-gate-2fa" placeholder="你的两步验证密码" autocomplete="current-password"></div>'
+            + '<button class="tgpan-gate-btn" id="tgpan-gate-go2fa">提交</button>'
+          : '<div class="tgpan-gate-field"><label>手机号（含国家码）</label>'
+            + '<input type="tel" id="tgpan-gate-phone" placeholder="+8613800138000" autocomplete="tel"'
+            + (codeStage ? ' disabled' : '') + ' value="' + escHtml(state.phoneNo) + '"></div>'
+            + (codeStage
+              ? '<div class="tgpan-gate-field"><label>验证码</label>'
+                + '<input type="text" inputmode="numeric" id="tgpan-gate-code" placeholder="Telegram 发来的 5 位数字" autocomplete="one-time-code"></div>'
+                + '<button class="tgpan-gate-btn" id="tgpan-gate-go">登录</button>'
+                + '<button class="tgpan-gate-btn ghost" id="tgpan-gate-back">换个手机号</button>'
+              : '<button class="tgpan-gate-btn" id="tgpan-gate-go">发送验证码</button>')
+        )
+        + '<div class="tgpan-gate-tip"><b>收不到验证码？</b> · 验证码会发到你 Telegram App 里（不是短信）。'
+        + '如果你手机没装 TG，请改用左边的「扫码登录」。</div>';
+
+      wirePhoneHandlers();
+      return;
+    }
+  }
+
+  function wirePhoneHandlers() {
+    var back = document.getElementById('tgpan-gate-back');
+    if (back) back.onclick = function () {
+      state.phoneStage = 'idle';
+      state.phoneCodeHash = '';
+      renderPanel();
+      setStatus('info', '可以换一个手机号');
+    };
+
+    var go2fa = document.getElementById('tgpan-gate-go2fa');
+    if (go2fa) {
+      var do2fa = function () {
+        var v = (document.getElementById('tgpan-gate-2fa') || {}).value || '';
+        if (!v) { setMsg('请输入两步验证密码', false); return; }
+        sendWS({ authType: '2fa', password: v });
+        setStatus('wait', '正在验证…');
+        setMsg('', true);
+      };
+      go2fa.onclick = do2fa;
+      var i2 = document.getElementById('tgpan-gate-2fa');
+      if (i2) { i2.focus(); i2.addEventListener('keydown', function (e) { if (e.key === 'Enter') do2fa(); }); }
+      return;
+    }
+
+    var go = document.getElementById('tgpan-gate-go');
+    if (!go) return;
+
+    if (state.phoneStage === 'code') {
+      var doLogin = function () {
+        var code = (document.getElementById('tgpan-gate-code') || {}).value || '';
+        if (!code) { setMsg('请输入验证码', false); return; }
+        sendWS({
+          authType: 'phone',
+          message: 'signin',
+          phoneCode: code.trim(),
+          phoneCodeHash: state.phoneCodeHash
+        });
+        setStatus('wait', '正在验证验证码…');
+        setMsg('', true);
+      };
+      go.onclick = doLogin;
+      var ic = document.getElementById('tgpan-gate-code');
+      if (ic) { ic.focus(); ic.addEventListener('keydown', function (e) { if (e.key === 'Enter') doLogin(); }); }
+      return;
+    }
+
+    var doSend = function () {
+      var phone = ((document.getElementById('tgpan-gate-phone') || {}).value || '').trim();
+      if (!phone) { setMsg('请输入手机号', false); return; }
+      if (phone.charAt(0) !== '+') { setMsg('手机号要以 + 开头，比如 +8613800138000', false); return; }
+      state.phoneNo = phone;
+      sendWS({ authType: 'phone', message: 'sendcode', phoneNo: phone });
+      setStatus('wait', '正在请求验证码…');
+      setMsg('', true);
+    };
+    go.onclick = doSend;
+    var ip = document.getElementById('tgpan-gate-phone');
+    if (ip) { ip.focus(); ip.addEventListener('keydown', function (e) { if (e.key === 'Enter') doSend(); }); }
+  }
+
+  // drawQR 用内置的成熟库（qrcode-generator）画二维码。
   //
-  // v2.7.0 以前这里会盖满整屏，导致「不配对 → 什么都进不去」。
-  // 现在改成非阻塞提示：管理密码已经能证明身份，TG 配对是后续扫描时才需要。
-  function renderNeedPair(msg) {
-    // 先把可能存在的整屏遮罩撤掉
-    removeOverlay();
+  // 【为什么用库而不是自己写】见文件头的「弯路二」。
+  // 自写版本用 jsQR 交叉验证 20/20 全挂；换成这个库后 20/20 通过。
+  function drawQR(text) {
+    var canvas = document.getElementById('tgpan-gate-qrcanvas');
+    if (!canvas) return;
+    var ctx = canvas.getContext('2d');
+    var size = canvas.width;
 
-    var bar = document.getElementById('tgpan-pair-bar');
-    if (bar && bar.parentNode) bar.parentNode.removeChild(bar);
+    if (!text) {
+      ctx.fillStyle = '#fff';
+      ctx.fillRect(0, 0, size, size);
+      return;
+    }
 
-    bar = document.createElement('div');
-    bar.id = 'tgpan-pair-bar';
-    bar.style.cssText = 'position:fixed;left:50%;transform:translateX(-50%);bottom:18px;'
-      + 'z-index:2147482000;max-width:92vw;display:flex;align-items:center;gap:12px;'
-      + 'padding:11px 14px;border-radius:10px;background:#1e293b;color:#e2e8f0;'
-      + 'box-shadow:0 10px 30px rgba(0,0,0,.32);font-size:13.5px;'
-      + 'font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC",sans-serif;';
-    bar.innerHTML = '<span>TGPan 还没和 Telegram 配对。去「系统设置 → 扫描频道」扫描时如果提示未登录，再来配一次即可。</span>'
-      + '<button id="tgpan-pair-go" style="flex:none;padding:6px 14px;border:none;border-radius:7px;'
-      + 'background:#2563eb;color:#fff;font-size:13px;cursor:pointer;">去配对</button>'
-      + '<button id="tgpan-pair-x" style="flex:none;background:none;border:none;color:#94a3b8;'
-      + 'font-size:17px;cursor:pointer;line-height:1;">×</button>';
-    (document.body || document.documentElement).appendChild(bar);
+    try {
+      if (typeof qrcode !== 'function') {
+        throw new Error('QR 库未加载（vendor-qrcode.js 缺失）');
+      }
+      var q = qrcode(0, 'M');
+      q.addData(text);
+      q.make();
 
-    var go = document.getElementById('tgpan-pair-go');
-    if (go) go.onclick = function () { window.open('/api/auth/ws', '_blank'); };
-    var x = document.getElementById('tgpan-pair-x');
-    if (x) x.onclick = function () { if (bar.parentNode) bar.parentNode.removeChild(bar); };
+      var n = q.getModuleCount();
+      var quiet = 4;
+      var total = n + quiet * 2;
+      var cell = size / total;
 
-    // 关键：仍然标记为 ok，让主界面的导航/按钮全部可用
-    try { document.documentElement.setAttribute('data-tgpan-gate', 'ok'); } catch (e) {}
+      ctx.fillStyle = '#fff';
+      ctx.fillRect(0, 0, size, size);
+      ctx.fillStyle = '#000';
+
+      for (var r = 0; r < n; r++) {
+        for (var c = 0; c < n; c++) {
+          if (!q.isDark(r, c)) continue;
+          var x = Math.floor((c + quiet) * cell);
+          var y = Math.floor((r + quiet) * cell);
+          var w = Math.floor((c + quiet + 1) * cell) - x;
+          var h = Math.floor((r + quiet + 1) * cell) - y;
+          ctx.fillRect(x, y, w, h);
+        }
+      }
+    } catch (e) {
+      ctx.fillStyle = '#fff';
+      ctx.fillRect(0, 0, size, size);
+      ctx.fillStyle = '#b91c1c';
+      ctx.font = '13px sans-serif';
+      ctx.textAlign = 'center';
+      ctx.fillText('二维码生成失败', size / 2, size / 2 - 8);
+      ctx.fillText('请改用手机号登录', size / 2, size / 2 + 12);
+      setMsg('二维码渲染出错：' + e.message, false);
+    }
   }
 
-  // 对外域名：输入管理密码
-  function renderLogin(msg) {
-    render(''
-      + '<div class="tgpan-gate-logo"><svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l7 3v6c0 4.5-3 7.5-7 9-4-1.5-7-4.5-7-9V6l7-3z"/><path d="M9 12l2 2 4-4"/></svg></div>'
-      + '<h1 class="tgpan-gate-title">TGPan</h1>'
-      + '<p class="tgpan-gate-sub">你正在通过外网域名访问，需要输入管理密码。</p>'
-      + '<div class="tgpan-gate-field"><label>管理密码</label>'
-      + '<input type="password" id="tgpan-gate-pwd" placeholder="请输入管理密码" autocomplete="current-password"></div>'
-      + '<button class="tgpan-gate-btn" id="tgpan-gate-go">进入</button>'
-      + '<div class="tgpan-gate-msg" id="tgpan-gate-msg">' + escHtml(msg || '') + '</div>'
-      + '<div class="tgpan-gate-tip"><b>提示</b> · 在飞牛 OS 里打开 TGPan 可以免密码直接进。'
-      + '这个密码在外网域名上才需要输。</div>'
-    );
-    var go = function () {
-      if (state.busy) return;
-      var v = (document.getElementById('tgpan-gate-pwd') || {}).value || '';
-      if (!v) { setMsg('请输入密码', false); return; }
-      state.busy = true;
-      req('/gate/login', { method: 'POST', body: { password: v } })
-        .then(function (st) { state.busy = false; applyStatus(st, ''); })
-        .catch(function (e) { state.busy = false; setMsg(e.message, false); });
-    };
-    var btn = document.getElementById('tgpan-gate-go');
-    if (btn) btn.onclick = go;
-    var inp = document.getElementById('tgpan-gate-pwd');
-    if (inp) { inp.focus(); inp.addEventListener('keydown', function (e) { if (e.key === 'Enter') go(); }); }
+  function switchMode(mode) {
+    if (state.mode === mode) return;
+    state.mode = mode;
+    state.phoneStage = 'idle';
+    // 重建整页，保证 tab 高亮和面板都同步
+    renderLogin('', true);
+    if (mode === 'phone') {
+      setStatus('info', '请输入手机号');
+      var ip = document.getElementById('tgpan-gate-phone');
+      if (ip) ip.focus();
+    } else {
+      setStatus('info', '请用手机 Telegram 扫码');
+      if (state.lastToken) drawQR(state.lastToken);
+    }
   }
 
   function setMsg(text, ok) {
     var el = document.getElementById('tgpan-gate-msg');
     if (!el) return;
     el.textContent = text;
-    el.className = 'tgpan-gate-msg' + (ok ? ' ok' : '');
+    el.className = 'tgpan-gate-msg' + (ok ? ' info' : '');
+  }
+
+  function setStatus(kind, text) {
+    var dot = document.getElementById('tgpan-gate-dot');
+    var t = document.getElementById('tgpan-gate-statustext');
+    if (t) t.textContent = text;
+    if (dot) dot.className = 'tgpan-gate-dot' + (kind === 'ok' ? ' ok' : kind === 'err' ? ' err' : '');
+  }
+
+  // ---------------------------------------------------------------------
+  //  WebSocket（TG 登录通道）
+  // ---------------------------------------------------------------------
+
+  function connectWS() {
+    if (state.ws && (state.ws.readyState === 0 || state.ws.readyState === 1)) return;
+
+    var ws;
+    try {
+      ws = new WebSocket(WS_URL);
+    } catch (e) {
+      setStatus('err', '无法建立连接');
+      setMsg('连接登录服务失败：' + e.message, false);
+      return;
+    }
+    state.ws = ws;
+
+    ws.onopen = function () {
+      setStatus('wait', '正在连接 Telegram…');
+      // 默认走扫码；如果用户已经切到手机号，就不要发 qr 请求
+      if (state.mode === 'qr') {
+        ws.send(JSON.stringify({ authType: 'qr' }));
+      }
+    };
+
+    ws.onmessage = function (ev) {
+      var msg;
+      try { msg = JSON.parse(ev.data); } catch (e) { return; }
+      handleWS(msg);
+    };
+
+    ws.onerror = function () {
+      setStatus('err', '连接出错');
+    };
+
+    ws.onclose = function () {
+      state.ws = null;
+      // 已配对 → 不用重连；否则过几秒重来一次
+      if (state.status && state.status.state === 'ok') return;
+      setStatus('err', '连接已断开，正在重连…');
+      setTimeout(function () {
+        if (state.status && state.status.state === 'ok') return;
+        connectWS();
+      }, 2500);
+    };
+  }
+
+  // handleWS 处理服务端推来的消息。
+  //
+  // 协议（后端 pkg/services/services_auth.go）：
+  //   → {"authType":"qr"}
+  //   ← {"type":"auth","payload":{"token":"tg://login?token=..."}}
+  //   ← {"type":"status","message":"已连接到 Telegram"}
+  //   ← {"type":"error","message":"..."}
+  //   → {"authType":"phone","message":"sendcode","phoneNo":"+86..."}
+  //   ← {"type":"auth","payload":{"phoneCodeHash":"..."}}
+  //   → {"authType":"phone","message":"signin","phoneCode":"...","phoneCodeHash":"..."}
+  //   ← {"type":"auth","message":"2FA required"} → 前端弹两步验证
+  //   ← {"type":"auth","payload":{session...},"message":"success"} → 成功
+  function handleWS(msg) {
+    if (!msg || !msg.type) return;
+
+    if (msg.type === 'status') {
+      setStatus('wait', msg.message || '正在连接 Telegram…');
+      return;
+    }
+
+    if (msg.type === 'error') {
+      setStatus('err', '出错了');
+      setMsg(msg.message || '未知错误', false);
+      // 手机号发码失败 → 退回可重输状态，否则按钮永远点不动
+      if (state.mode === 'phone' && state.phoneStage === 'idle') {
+        renderPanel();
+      }
+      return;
+    }
+
+    if (msg.type !== 'auth') return;
+
+    var payload = msg.payload || {};
+
+    // 1) 扫码 token
+    if (payload.token) {
+      state.lastToken = payload.token;
+      if (state.mode === 'qr') {
+        drawQR(payload.token);
+        setStatus('ok', '请用手机 Telegram 扫码');
+      }
+      return;
+    }
+
+    // 2) 手机号发码成功 → 进入输入验证码阶段
+    if (payload.phoneCodeHash) {
+      state.phoneCodeHash = payload.phoneCodeHash;
+      state.phoneStage = 'code';
+      setStatus('info', '验证码已发出，请查看 Telegram');
+      setMsg('验证码已发送到你的 Telegram，请填入下方', true);
+      if (state.mode !== 'phone') switchMode('phone'); else renderPanel();
+      return;
+    }
+
+    // 3) 需要两步验证
+    if (msg.message === '2FA required') {
+      state.phoneStage = '2fa';
+      setStatus('info', '需要两步验证密码');
+      setMsg('该账号开启了两步验证，请输入密码', true);
+      renderPanel();
+      return;
+    }
+
+    // 4) 登录成功
+    //
+    // 【关键】拿到 claim 之后必须先兑换浏览器门票，再进主界面。
+    // 不兑换的话，服务端虽然有 TG 凭证，但你这个浏览器没票，
+    // 下一次请求（甚至下一次刷新）照样被挡回登录页 —— 看起来就是
+    // "登录了但马上又退出来了"。
+    if (msg.message === 'success' || payload.session) {
+      if (msg.claim) {
+        setStatus('ok', '登录成功，正在进入…');
+        setMsg('登录成功', true);
+        claimTicket(msg.claim);
+      } else {
+        // 后端没给 claim（理论上不该发生）→ 直接用现有 Cookie 试一次
+        setStatus('info', '登录成功，正在确认…');
+        onPaired();
+      }
+      return;
+    }
+  }
+
+  // claimTicket 用一次性领取码换取浏览器门票，然后进主界面。
+  function claimTicket(claim) {
+    req('/gate/claim', { method: 'POST', body: { token: claim } })
+      .then(function (st) { applyStatus(st, ''); })
+      .catch(function (e) {
+        setStatus('err', '登录凭据换取失败');
+        setMsg('登录成功了，但换取访问凭据失败：' + e.message + '。请刷新页面重试。', false);
+      });
+  }
+
+  function sendWS(obj) {
+    if (!state.ws || state.ws.readyState !== 1) {
+      // 还没连上 → 等一下就绪再发（最多重试 20 次，约 10 秒）
+      var tries = (state._wsRetry || 0);
+      if (tries > 20) {
+        setMsg('连接登录服务超时，请刷新页面重试', false);
+        return;
+      }
+      state._wsRetry = tries + 1;
+      setTimeout(function () { sendWS(obj); }, 500);
+      return;
+    }
+    state._wsRetry = 0;
+    state.ws.send(JSON.stringify(obj));
   }
 
   // ---------------------------------------------------------------------
   //  状态应用
   // ---------------------------------------------------------------------
+
   function applyStatus(st, okMsg) {
     state.status = st;
     if (!st) return;
+
     if (st.state === 'ok') {
       removeOverlay();
-      // 通知其他 TGPan 脚本：已登录，可以显示控制台
+      closeWS();
+      renderAccountChip(st);
       try {
         // 除了发事件，还在 window 上留一个标记。
         //
@@ -264,33 +588,105 @@
       } catch (e) {}
       return;
     }
-    try { document.documentElement.setAttribute('data-tgpan-gate', st.state); } catch (e) {}
-    if (st.state === 'init') renderSetup(okMsg || '', false);
-    else if (st.state === 'need_pair') renderNeedPair(okMsg || '');
-    else if (st.state === 'need_login') renderLogin(okMsg || '');
+
+    // 未登录 → 展示登录页
+    try { document.documentElement.setAttribute('data-tgpan-gate', 'need_login'); } catch (e) {}
+    removeAccountChip();
+    renderLogin(okMsg || '', true);
   }
 
-  function refresh(okMsg) {
-    req('/gate/status')
-      .then(function (st) { applyStatus(st, okMsg); })
-      .catch(function () { /* 状态接口不可用 → 不拦，交给原登录流程 */ removeOverlay(); });
+  // renderAccountChip 在主界面角落挂一个「换账号」浮标。
+  //
+  // 为什么需要：登录后凭证存在服务端，用户可能想换成另一个 TG 账号
+  // （比如换成有更多空间的号）。没这个入口就只能去删容器里的文件。
+  function renderAccountChip(st) {
+    removeAccountChip();
+    var chip = document.createElement('div');
+    chip.id = 'tgpan-account-chip';
+    var who = st.name || st.user || '';
+    chip.title = who ? ('已登录：' + who + '（点击可换账号）') : '点击可换账号';
+    chip.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" '
+      + 'stroke-width="2" stroke-linecap="round" stroke-linejoin="round">'
+      + '<path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>'
+      + '<span>' + escHtml(who ? ('换账号 · ' + who) : '换账号') + '</span>';
+
+    chip.onclick = function () {
+      if (!window.confirm('要退出当前 Telegram 账号，换一个账号登录吗？\n\n（需要重新扫码或输验证码）')) return;
+      chip.style.opacity = '.4';
+      chip.style.pointerEvents = 'none';
+      req('/gate/repair', { method: 'POST' })
+        .then(function (st2) { applyStatus(st2, '已退出，请重新登录'); })
+        .catch(function (e) {
+          chip.style.opacity = '';
+          chip.style.pointerEvents = '';
+          window.alert('退出失败：' + e.message);
+        });
+    };
+    (document.body || document.documentElement).appendChild(chip);
+  }
+
+  function removeAccountChip() {
+    var el = document.getElementById('tgpan-account-chip');
+    if (el && el.parentNode) el.parentNode.removeChild(el);
+  }
+
+  // onPaired 兜底路径：没拿到 claim 码时，直接查一次状态。
+  //
+  // 正常情况下走 claimTicket（拿码换票）。这条只是防御：
+  // 万一后端版本不匹配、或者 claim 字段丢了，至少不会卡死在登录页。
+  function onPaired() {
+    if (state.qrTimer) { clearInterval(state.qrTimer); state.qrTimer = null; }
+    var tries = 0;
+    var check = function () {
+      req('/gate/status')
+        .then(function (st) {
+          if (st && st.state === 'ok') { applyStatus(st, ''); }
+          else if (tries++ < 8) { setTimeout(check, 400); }
+          else {
+            setStatus('err', '登录成功但服务端未就绪');
+            setMsg('登录成功了，但服务端还没准备好。请刷新页面。', false);
+          }
+        })
+        .catch(function () { if (tries++ < 8) setTimeout(check, 400); });
+    };
+    setTimeout(check, 300);
+  }
+
+  function closeWS() {
+    if (state.qrTimer) { clearInterval(state.qrTimer); state.qrTimer = null; }
+    if (state.ws) {
+      try { state.ws.onclose = null; state.ws.close(); } catch (e) {}
+      state.ws = null;
+    }
   }
 
   // ---------------------------------------------------------------------
   //  启动
   // ---------------------------------------------------------------------
+
+  function refresh(okMsg) {
+    req('/gate/status')
+      .then(function (st) { applyStatus(st, okMsg); })
+      .catch(function () {
+        // 状态接口不可用（后端还没起来 / 网络抖动）→ 不拦，交给原流程，
+        // 但要提示一下，否则用户看到的是白屏
+        removeOverlay();
+        setStatus('err', '无法读取登录状态');
+      });
+  }
+
   function boot() {
     injectStyle();
     refresh();
-    // 轮询：配对成功后自动撤除遮罩（用户此时在原登录页扫码）
+    // 轮询：用户可能在另一个标签页/设备上完成了登录，
+    // 这里也要跟着进去。只在未登录时轮询。
     if (!state.pollTimer) {
       state.pollTimer = setInterval(function () {
-        if (!state.status || state.status.state === 'ok') return;
+        if (state.status && state.status.state === 'ok') return;
         req('/gate/status').then(function (st) {
-          if (st && st.state === 'ok') { applyStatus(st, ''); }
-          else if (st && state.status && st.state !== state.status.state) { applyStatus(st, ''); }
+          if (st && st.state === 'ok') applyStatus(st, '');
         }).catch(function () {});
-      }, 3000);
+      }, 5000);
     }
   }
 
