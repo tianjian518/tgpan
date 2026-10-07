@@ -296,6 +296,7 @@ func listenOnConfiguredPort(port int) (net.Listener, error) {
 | `internal_auth.go` | `internal/auth/auth.go` |
 | `internal_reader_tg_reader.go` | `internal/reader/tg_reader.go` |
 | `internal_database_tuning.go` | `internal/database/tuning.go` |
+| `internal_retry.go` | `internal/retry/retry.go` |
 | `tgc.go` | `internal/tgc/tgc.go` |
 | `20261005090000_tg_dialogs.sql` | `internal/database/migrations/20261005090000_tg_dialogs.sql` |
 
@@ -356,6 +357,7 @@ cp $S/tgc.go                      internal/tgc/tgc.go
 cp $S/run.go                      cmd/run.go
 cp $S/internal_database_database.go      internal/database/database.go
 cp $S/internal_database_tuning.go        internal/database/tuning.go
+cp $S/internal_retry.go                  internal/retry/retry.go
 cp $S/internal_reader_reader.go          internal/reader/reader.go
 cp $S/internal_reader_tg_reader.go       internal/reader/tg_reader.go
 for m in 20261004080000_webdav_credentials 20261004080100_channel_scans \
@@ -369,6 +371,7 @@ cp $S/dialogs_test.go             pkg/services/dialogs_test.go
 cp $S/episode_test.go             pkg/services/episode_test.go
 cp $S/security_test.go            pkg/services/security_test.go
 cp $S/internal_database_tuning_test.go   internal/database/tuning_test.go
+cp $S/internal_retry_test.go             internal/retry/retry_test.go
 cp $S/internal_reader_window_test.go     internal/reader/window_test.go
 cp $S/internal_reader_timing_test.go     internal/reader/timing_test.go
 cp $S/run_port_test.go                   cmd/run_port_test.go
