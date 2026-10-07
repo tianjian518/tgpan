@@ -304,10 +304,18 @@ func (h *webdavHandler) parsePath(raw string) (string, error) {
 		p = p[len(webdavPrefix):]
 	}
 	// URL 解码（中文文件夹名必须解码，否则查不到）
-	decoded, err := url.PathUnescape(p)
-	if err != nil {
-		return "", err
-	}
+	//
+	// 【为什么不能直接用 url.PathUnescape】
+	// PathUnescape 遇到「% 后面不是合法两位十六进制」时会**整个报错**，
+	// 返回空串 + 错误。而影视文件名里带百分号非常常见：
+	//   "100%某剧"、"50%off.mp4"、"评分98%.mkv"
+	// 这类路径一旦被整串拒绝，播放器拿到的是 400 Bad Request，
+	// 在爆米花/Infuse 里表现就是「这个文件打不开」，而用户根本
+	// 猜不到是文件名里那个百分号导致的。
+	//
+	// 所以改成「逐段容错解码」：能解的就解，解不开的（裸 % 号）
+	// 按原样保留，绝不因为一个字符把整条路径废掉。
+	decoded := unescapeTolerant(p)
 	// 规范化：去掉首尾斜杠，清理 .. 之类的越权路径
 	decoded = strings.Trim(decoded, "/")
 	if decoded == "" {
@@ -319,6 +327,59 @@ func (h *webdavHandler) parsePath(raw string) (string, error) {
 		return "", fmt.Errorf("path traversal detected")
 	}
 	return cleaned, nil
+}
+
+// unescapeTolerant 对 URL 路径做「容错解码」。
+//
+// 与 url.PathUnescape 的区别：PathUnescape 只要碰到一个非法的 % 转义
+// （比如文件名里的裸百分号 "100%某剧"），就会整串返回错误；
+// 这里只把**合法的 %XX** 解码，其余的 % 原样保留。
+//
+// 语义上更接近「浏览器/播放器实际想表达的意思」：
+// 客户端发来的路径如果做了编码，就还原；没编码（或编码不完整）的部分，原样用。
+//
+// 同时把 '+' 保持原样（路径段的 '+' 不是空格，这点和 query 不同）。
+func unescapeTolerant(s string) string {
+	// 没有 % 就不用解，直接返回（绝大多数请求走这条快路）
+	if !strings.Contains(s, "%") {
+		return s
+	}
+
+	var b strings.Builder
+	b.Grow(len(s))
+
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if c != '%' || i+2 >= len(s) {
+			// 不是 % 或者 % 后面不足两位：原样写
+			b.WriteByte(c)
+			continue
+		}
+		hi := unhex(s[i+1])
+		lo := unhex(s[i+2])
+		if hi < 0 || lo < 0 {
+			// % 后面不是合法十六进制：这个 % 当普通字符，原样写，
+			// 后续字符继续正常扫描（不要跳过，否则会吃掉字符）
+			b.WriteByte(c)
+			continue
+		}
+		b.WriteByte(byte(hi<<4 | lo))
+		i += 2
+	}
+	return b.String()
+}
+
+// unhex 把十六进制字符转成数值，非法返回 -1。
+func unhex(c byte) int {
+	switch {
+	case c >= '0' && c <= '9':
+		return int(c - '0')
+	case c >= 'a' && c <= 'f':
+		return int(c-'a') + 10
+	case c >= 'A' && c <= 'F':
+		return int(c-'A') + 10
+	}
+	return -1
 }
 
 // ---------------------------------------------------------------------------
