@@ -311,6 +311,14 @@
           authType: 'phone',
           message: 'signin',
           phoneCode: code.trim(),
+          // 【2026-10-10 修复】必须带上 phoneNo！
+          //
+          // 服务端 handlePhoneAuth 的 signin 分支是：
+          //     tgClient.Auth().SignIn(ctx, message.PhoneNo, message.PhoneCode, message.PhoneCodeHash)
+          // 三项缺一不可。此前这里漏传 phoneNo，服务端拿到空手机号，
+          // TG 校验哈希时直接回 PHONE_CODE_EXPIRED —— 用户看到的就是
+          // 「验证码收到了却提示已过期」，且与网络/节点无关，百分百复现。
+          phoneNo: state.phoneNo,
           phoneCodeHash: state.phoneCodeHash
         });
         setStatus('wait', '正在验证验证码，请稍候（约 10~15 秒）…');
