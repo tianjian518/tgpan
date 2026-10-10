@@ -12,6 +12,8 @@ import (
 	"github.com/gotd/td/telegram"
 	"github.com/gotd/td/telegram/dcs"
 	"github.com/tgdrive/teldrive/internal/tgc"
+	"github.com/tgdrive/teldrive/internal/utils"
+	"golang.org/x/net/proxy"
 )
 
 // ---------------------------------------------------------------------------
@@ -194,6 +196,15 @@ func (e *extendedService) runDiagnostics(ctx context.Context) []diagCheck {
 	}
 
 	// ---- 3. TCP 直连 Telegram 数据中心 ----
+	//
+	// 【2026-10 修复】配了代理时，这一项改用「经代理拨号」并明确标注。
+	//
+	// 先前无论是否配置代理，这里都走 net.DialTimeout 裸连 TG 的 443 端口。
+	// 在国内/被墙环境下裸连必然全 ❌，页面于是长期显示
+	// 「全部不通说明网络层面被阻断」，把用户的注意力引向「网络坏了」，
+	// 而实际上流量是走代理的、完全正常。这是纯粹的误导。
+	//
+	// 现在：能拿到代理配置就经代理拨，并在文案里说明走的是代理。
 	dcsToTry := []struct{ name, addr string }{
 		{"DC1 (149.154.175.50)", "149.154.175.50:443"},
 		{"DC2 (149.154.167.51)", "149.154.167.51:443"},
@@ -202,10 +213,18 @@ func (e *extendedService) runDiagnostics(ctx context.Context) []diagCheck {
 	}
 	anyDC := false
 	var dcDetail string
+	viaProxy := strings.TrimSpace(e.api.cnf.TG.Proxy) != ""
 	{
 		t0 := time.Now()
+		var dialer dcs.DialFunc = proxy.Direct.DialContext
+		if viaProxy {
+			if d, err := utils.Proxy.GetDial(e.api.cnf.TG.Proxy); err == nil {
+				dialer = d.DialContext
+			}
+		}
 		for _, dc := range dcsToTry {
-			conn, err := net.DialTimeout("tcp", dc.addr, 5*time.Second)
+			cctx, ccancel := context.WithTimeout(ctx, 12*time.Second)
+			conn, err := dialer(cctx, "tcp", dc.addr)
 			if err == nil {
 				_ = conn.Close()
 				anyDC = true
@@ -213,9 +232,14 @@ func (e *extendedService) runDiagnostics(ctx context.Context) []diagCheck {
 			} else {
 				dcDetail += "❌ " + dc.name + "  "
 			}
+			ccancel()
 		}
-		out = append(out, diagCheck{"TCP 直连 TG 数据中心", anyDC,
-			dcDetail + "（全部不通说明网络层面被阻断）", ms(t0)})
+		how := "直连"
+		if viaProxy {
+			how = "经代理 " + e.api.cnf.TG.Proxy
+		}
+		out = append(out, diagCheck{"TCP 连接 TG 数据中心（" + how + "）", anyDC,
+			dcDetail + "（全部不通说明这条链路有问题）", ms(t0)})
 	}
 
 	// ---- 4. 真实 MTProto 握手（最关键的检测）----
@@ -230,7 +254,10 @@ func (e *extendedService) runDiagnostics(ctx context.Context) []diagCheck {
 
 // testMTProto 用真实客户端做一次连接 + 调用，最能反映实际可用性
 func (e *extendedService) testMTProto(ctx context.Context) (bool, string) {
-	cctx, cancel := context.WithTimeout(ctx, 20*time.Second)
+	// 【2026-10 修复】超时从 20s 放宽到 90s。
+	// 通过代理连 TG 实测要 10-19 秒，20s 会踩在临界点上，
+	// 表现为「有时通过、有时超时」的抖动，误导排查。
+	cctx, cancel := context.WithTimeout(ctx, 90*time.Second)
 	defer cancel()
 
 	client, err := tgc.NoAuthClient(cctx, &e.api.cnf.TG, nil, nil)

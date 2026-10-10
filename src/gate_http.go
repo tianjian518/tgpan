@@ -34,6 +34,21 @@ func gateExemptPath(p string) bool {
 	case "/version", "/api/version", "/health", "/api/health":
 		return true
 	}
+	// 【2026-10 修复】诊断类页面必须豁免。
+	//
+	// 这三个页面存在的唯一理由，就是「还没登录成功时，让人能看清卡在哪一步」。
+	// 此前它们被闸门拦成 401，等于最需要诊断的时刻偏偏打不开 ——
+	// 用户只能看到登录页转圈，服务端日志也拿不到，排查无从下手。
+	//
+	// 安全性说明：它们都不返回任何用户数据。
+	//   · /diag       只输出到 TG 的连通性检测结果
+	//   · /logincheck 只输出一次发码流程的逐步结果（有 60s 节流，防被当发码器刷）
+	//   · /authlog    只输出登录事件的时间线，内容已做过脱敏
+	// 因此放在闸门外不会造成信息泄露。
+	switch strings.TrimPrefix(p, "/api") {
+	case "/diag", "/diag.json", "/logincheck", "/authlog":
+		return true
+	}
 	return false
 }
 

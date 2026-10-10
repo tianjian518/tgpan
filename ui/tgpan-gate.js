@@ -290,19 +290,39 @@
     if (!go) return;
 
     if (state.phoneStage === 'code') {
+      // 【2026-10 修正】提交验证码期间「锁死按钮」，防连点。
+      //
+      // 为什么必须锁：TG 的登录验证码是**一次性的**。日志里能看到
+      //   07:28:23 / 07:28:26 / 07:28:28 三次 signin 全报 PHONE_CODE_EXPIRED ——
+      // 第一次就把码用掉了，后面几次必然过期。用户看到的现象就是
+      // 「闪过一行字然后出错」，其实是自己连点把码点废了。
+      //
+      // 另外：每点一次，前端也会把 WebSocket 重建一遍，连带后端重新跟 TG
+      // 握手（11~13 秒），越点越慢、越点越不可能成功。所以这里锁住，
+      // 一次只允许一个在途请求，直到服务端给答复才解锁。
+      var submitting = false;
       var doLogin = function () {
+        if (submitting) return;              // 在途 → 直接吞掉重复点击
         var code = (document.getElementById('tgpan-gate-code') || {}).value || '';
         if (!code) { setMsg('请输入验证码', false); return; }
+        submitting = true;
+        if (go) { go.disabled = true; go.style.opacity = '0.6'; go.style.cursor = 'not-allowed'; }
         sendWS({
           authType: 'phone',
           message: 'signin',
           phoneCode: code.trim(),
           phoneCodeHash: state.phoneCodeHash
         });
-        setStatus('wait', '正在验证验证码…');
-        setMsg('', true);
+        setStatus('wait', '正在验证验证码，请稍候（约 10~15 秒）…');
+        setMsg('已提交，请耐心等待，不要重复点击', true);
       };
       go.onclick = doLogin;
+      // 把「解锁」句柄挂到 state 上，handleWS 收到答复时调用
+      state.unlockLogin = function () {
+        submitting = false;
+        var g = document.getElementById('tgpan-gate-go');
+        if (g) { g.disabled = false; g.style.opacity = ''; g.style.cursor = ''; }
+      };
       var ic = document.getElementById('tgpan-gate-code');
       if (ic) { ic.focus(); ic.addEventListener('keydown', function (e) { if (e.key === 'Enter') doLogin(); }); }
       return;
@@ -313,6 +333,7 @@
       if (!phone) { setMsg('请输入手机号', false); return; }
       if (phone.charAt(0) !== '+') { setMsg('手机号要以 + 开头，比如 +8613800138000', false); return; }
       state.phoneNo = phone;
+      state._lastPhoneNo = phone;   // 断线自动续接时重新发码用
       sendWS({ authType: 'phone', message: 'sendcode', phoneNo: phone });
       setStatus('wait', '正在请求验证码…');
       setMsg('', true);
@@ -425,10 +446,25 @@
     state.ws = ws;
 
     ws.onopen = function () {
+      state._reconnTries = 0;   // 连上了 → 退避计数清零
       setStatus('wait', '正在连接 Telegram…');
       // 默认走扫码；如果用户已经切到手机号，就不要发 qr 请求
+      // （发 qr 会让后端重新握手一次，手机号流程里纯属添乱）
       if (state.mode === 'qr') {
         ws.send(JSON.stringify({ authType: 'qr' }));
+      }
+      // 【v14】断线自动续接：等验证码的途中通道断了（手机切后台、
+      // 路由器掐空闲连接），重连后自动重新发一次验证码 —— 旧连接里的
+      // phoneCodeHash 已随旧通道作废，必须重新发码才有新 hash。
+      // 用户只需要输入「最新一条」验证码，不用刷新页面。
+      else if (state.mode === 'phone' && state.phoneStage === 'code' && state._autoResume) {
+        state._autoResume = false;
+        var pn = state._lastPhoneNo || '';
+        if (pn) {
+          setStatus('wait', '连接已恢复，正在重新发送验证码…');
+          ws.send(JSON.stringify({ authType: 'phone', message: 'sendcode', phoneNo: pn }));
+          setMsg('刚才的通道断了，验证码已重新发送 —— 请输入【最新收到】的验证码。', true);
+        }
       }
     };
 
@@ -446,11 +482,45 @@
       state.ws = null;
       // 已配对 → 不用重连；否则过几秒重来一次
       if (state.status && state.status.state === 'ok') return;
-      setStatus('err', '连接已断开，正在重连…');
+
+      // 【2026-10 修正】重连要「减速退避」，不能再每 2.5 秒猛敲。
+      //
+      // 原来固定 2.5 秒重连一次，而每次 onopen 只要还停在扫码模式就会
+      // 补发一条 {authType:'qr'} —— 后端收到就**新建一个 TG 客户端重新握手**，
+      // 一次要 11~13 秒。结果就是：连接老是断、重连又老是打断握手，
+      // 后端反复处在「还没连上 TG」的状态（日志里 tg_ready=false 满地都是），
+      // 用户操作就总是踩空。
+      //
+      // 改成 3s → 6s → 12s → 24s 逐步退避，并且一旦用户已经进入
+      // 手机号流程（sendcode 之后），就不再自动重连 —— 那条 WebSocket
+      // 里握着 phoneCodeHash 的会话，断了就让它断，让用户自己刷新重来，
+      // 总比重连把它冲掉强。
+      state._reconnTries = (state._reconnTries || 0) + 1;
+      if (state.mode === 'phone' && state.phoneStage !== 'idle') {
+        // 【v14】手机流程中断线：不再让用户手动刷新 —— 自动重连，
+        // 连上后自动重新发验证码（见 onopen 的 _autoResume 分支）。
+        // 后端已加心跳保活，正常情况下通道不会再死；这里只兜底。
+        // 最多自动恢复 3 次，超过就老实提示刷新（防死循环消耗发码次数）。
+        if ((state._reconnTries - 1) < 3 && state.phoneStage === 'code') {
+          state._autoResume = true;
+          setStatus('wait', '连接断开，正在自动恢复…');
+          var dResume = Math.min(2000 * Math.pow(2, state._reconnTries - 1), 8000);
+          setTimeout(function () {
+            if (state.status && state.status.state === 'ok') return;
+            connectWS();
+          }, dResume);
+          return;
+        }
+        setStatus('err', '连接已断开');
+        setMsg('登录通道多次断开，请刷新页面后重试。', false);
+        return;
+      }
+      var delay = Math.min(3000 * Math.pow(2, state._reconnTries - 1), 24000);
+      setStatus('err', '连接已断开，' + Math.round(delay / 1000) + ' 秒后重连…');
       setTimeout(function () {
         if (state.status && state.status.state === 'ok') return;
         connectWS();
-      }, 2500);
+      }, delay);
     };
   }
 
@@ -475,6 +545,7 @@
     }
 
     if (msg.type === 'error') {
+      if (state.unlockLogin) state.unlockLogin();
       setStatus('err', '出错了');
       setMsg(msg.message || '未知错误', false);
       // 手机号发码失败 → 退回可重输状态，否则按钮永远点不动
@@ -485,6 +556,27 @@
     }
 
     if (msg.type !== 'auth') return;
+
+    // 【2026-10 修正】后端把验证码类错误转成了短码（见 pkg/services/auth.go），
+    // 这里翻译成中文，并明确告诉用户「下一步该干嘛」——重新发一个新码，
+    // 而不是让人一脸懵地对着英文报错反复点「登录」。
+    var CODE_HINT = {
+      PHONE_CODE_INVALID: '验证码不正确。请核对后重新输入；若多次不对，请返回上一步重新获取。',
+      PHONE_CODE_EXPIRED: '验证码已过期（很可能已经被用过一次）。请点「重新获取验证码」，用**最新的那个码**，并且只点一次「登录」。',
+      PHONE_CODE_EMPTY:   '验证码是空的。请填写 Telegram 发来的验证码。',
+      PHONE_CODE_HASH_EMPTY: '验证码会话失效了，请返回上一步重新获取验证码。',
+      CODE_HASH_INVALID:  '验证码会话已失效（通常是因为中途重连了）。请返回上一步重新获取验证码。'
+    };
+    if (CODE_HINT[msg.message]) {
+      if (state.unlockLogin) state.unlockLogin();
+      // 码废了 → 退回「输入手机号」这一步，逼用户重新发码，避免继续用旧码
+      state.phoneStage = 'idle';
+      state.phoneCodeHash = '';
+      setStatus('err', '验证码已失效');
+      setMsg(CODE_HINT[msg.message], false);
+      renderPanel();
+      return;
+    }
 
     var payload = msg.payload || {};
 
@@ -500,16 +592,18 @@
 
     // 2) 手机号发码成功 → 进入输入验证码阶段
     if (payload.phoneCodeHash) {
+      if (state.unlockLogin) state.unlockLogin();
       state.phoneCodeHash = payload.phoneCodeHash;
       state.phoneStage = 'code';
       setStatus('info', '验证码已发出，请查看 Telegram');
-      setMsg('验证码已发送到你的 Telegram，请填入下方', true);
+      setMsg('验证码已发送到你的 Telegram。填好后点「登录」只需一次，请耐心等它转完。', true);
       if (state.mode !== 'phone') switchMode('phone'); else renderPanel();
       return;
     }
 
     // 3) 需要两步验证
     if (msg.message === '2FA required') {
+      if (state.unlockLogin) state.unlockLogin();
       state.phoneStage = '2fa';
       setStatus('info', '需要两步验证密码');
       setMsg('该账号开启了两步验证，请输入密码', true);

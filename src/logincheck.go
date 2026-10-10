@@ -77,7 +77,18 @@ func (e *extendedService) runLoginProbe(ctx context.Context, phone string) []log
 		fmt.Sprintf("成功（app-id=%d）", e.api.cnf.TG.AppId), ms(t0)})
 
 	// ---- 第 2 / 3 步：连接 TG，然后真实请求验证码 ----
-	cctx, cancel := context.WithTimeout(ctx, 40*time.Second)
+	//
+	// 【2026-10 修复】超时从 40s 放宽到 150s。
+	//
+	// 这个自检页要在一次请求里跑完「连接 + 可能的 DC 迁移 + 发码」，
+	// 而通过代理连 TG 本身就要花十几到二十秒（实测首次握手 18.6s，
+	// DC 迁移更久）。原来的 40s 会在中途把 ctx 掐断，
+	// 页面于是显示 "migrate to dc: context deadline exceeded" ——
+	// 看起来像功能坏了，其实只是自检页自己设的闹钟太短。
+	//
+	// 真实登录走的是 WebSocket 长连接（没有这个限制），
+	// 所以自检页的超时必须比真实路径更宽松，否则会误报。
+	cctx, cancel := context.WithTimeout(ctx, 150*time.Second)
 	defer cancel()
 
 	var sendErr error

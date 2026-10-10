@@ -178,7 +178,11 @@ echo
 echo "==> 5.3 闸门脚本（tgpan-gate.js）"
 
 if [ -n "$GATE" ]; then
-  for kw in '/gate/setup' '/gate/login' '/gate/status'; do
+  # 接口名以当前后端为准（见 pkg/services/gate_http.go 的路由注释）：
+  #   /gate/status 查状态、/gate/claim 换取门票、/gate/repair 换账号
+  # 早期版本这里写的是 /gate/setup、/gate/login，接口改名后没跟着改，
+  # 会导致自检永远报 2 项失败 —— 用不存在的断言去量正确的代码。
+  for kw in '/gate/claim' '/gate/repair' '/gate/status'; do
     if echo "$GATE" | grep -q "$kw"; then
       pass "含 $kw"
     else

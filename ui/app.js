@@ -638,7 +638,7 @@
         if (c.folderId) want[c.folderId] = c;
       });
 
-      return listFiles({ limit: MAX_LIMIT }).then(function (r) {
+      return listFiles({ limit: MAX_LIMIT, foldersOnly: true }).then(function (r) {
         var all = filesOf(r);
 
         // 注意：不传 parentId 时后端会递归返回**所有层级**的文件。
@@ -669,7 +669,7 @@
     }).catch(function () {
       // 拿频道登记失败（最常见：还没配对 TG，接口 401）。
       // 这不该让整页报错 —— 退回直接列根目录，用户至少能看到已有文件。
-      return listFiles({ limit: MAX_LIMIT }).then(function (r) {
+      return listFiles({ limit: MAX_LIMIT, foldersOnly: true }).then(function (r) {
         var all = filesOf(r);
         var picks = all.filter(function (f) {
           var pid = f.parentId;
@@ -720,8 +720,12 @@
     var q = [];
     // 根目录：**不要**传 parentId。后端把 parent_id 当 UUID 解析，
     // 传 "root" 会直接 SQLSTATE 22P02（invalid input syntax for type uuid）。
-    // 注意：不传 parentId 时后端返回的是**全部层级**的文件（递归），
-    // 需要在前端按 parentId 过滤出真正的根目录项。
+    //
+    // 【2026-10 修复】不传 parentId 时后端返回的是「全部层级」的文件，
+    // 再靠 limit 截断取前 N 条。文件一多（本库 1965 个），
+    // 根目录的频道文件夹就被挤到 1000 条之外，界面上只剩两三个频道。
+    // 修法：根目录查询加 category=folder，只取文件夹（几十个，永不截断）。
+    if (params.foldersOnly) q.push('category=folder');
     if (params.parentId) q.push('parentId=' + encodeURIComponent(params.parentId));
     q.push('limit=' + (params.limit || MAX_LIMIT));
     q.push('sort=name');
@@ -995,13 +999,90 @@
 
   function renderDialogRow(d) {
     var scanning = false;
+    var deepRunning = false;
     var btn = el('button', { class: 'tp-btn primary', text: d.scanned ? '扫新视频' : '扫描' });
     var info = el('div', { class: 'tp-hint', text: d.scanned
       ? ('上次扫过 · 已导入 ' + (d.imported || 0) + ' 个')
       : '还没扫过' });
 
+    // ---------- 翻老片（深度扫描）----------
+    //
+    // 普通「扫描」只看新视频；「翻老片」是从当前位置往回翻频道历史，
+    // 把更早发布的老片也收进网盘。一次点击自动翻很多批（每批 2000 条
+    // 消息，批与批之间歇 1.5 秒防 TG 限流），直到翻完整个频道历史，
+    // 或单轮翻满 20 批（4 万条）先收工 —— 频道特别大时再点一次接着翻。
+    // 中途断了也没关系：进度存在数据库里，再点一次从断点继续。
+    var deepBtn = el('button', {
+      class: 'tp-btn', text: '翻老片',
+      title: '往回翻频道历史，把更早的老片也扫进网盘'
+    });
+    deepBtn.onclick = function () {
+      if (deepRunning || scanning) return;
+      deepRunning = true;
+      deepBtn.disabled = true;
+      btn.disabled = true;
+
+      var tScanned = 0, tImported = 0, rounds = 0, lastMore = false;
+      var t0 = Date.now();
+      deepBtn.textContent = '翻老片 0条';
+
+      function round() {
+        rounds++;
+        req('/scan/channel', { method: 'POST', body: { channelId: d.channelId, deep: true, batch: 2000 } })
+          .then(function (r) {
+            tScanned += (r.deepScanned || 0);
+            tImported += (r.imported || 0);
+            lastMore = !!r.hasMore;
+            deepBtn.textContent = '翻老片 ' + tScanned + '条';
+
+            // 还有更早的且没翻满 20 批 → 歇 1.5 秒继续下一批
+            if (lastMore && rounds < 20) {
+              setTimeout(round, 1500);
+              return;
+            }
+
+            deepRunning = false;
+            deepBtn.disabled = false;
+            btn.disabled = false;
+            deepBtn.textContent = lastMore ? '继续翻老片' : '翻老片';
+            var secs = Math.round((Date.now() - t0) / 1000);
+            clear(out);
+            out.appendChild(el('div', { class: 'tp-alert ' + (tImported > 0 ? 'ok' : 'info') }, [
+              el('b', { text: lastMore ? '这轮翻完了，频道历史还没到头' : '老片翻完了' }),
+              el('div', { text: (r.channelName || d.title) + '：往回翻了 ' + tScanned + ' 条消息，新进 ' + tImported + ' 个视频' }),
+              el('div', { class: 'tp-hint', text: lastMore
+                ? '这个频道历史很长，歇一会儿再点「继续翻老片」接着往回翻。'
+                : '整个频道的历史已经全部翻完，用时 ' + secs + ' 秒。' })
+            ]));
+            if (tImported > 0) {
+              toastOk('翻到 ' + tImported + ' 个老片，用时 ' + secs + ' 秒');
+              state.channels = null;
+              if (state.tab === 'drive') {
+                doLoad(state.cwd.length ? state.cwd[state.cwd.length - 1].id : null, true);
+              }
+            }
+          })
+          .catch(function (e) {
+            deepRunning = false;
+            deepBtn.disabled = false;
+            btn.disabled = false;
+            deepBtn.textContent = '继续翻老片';
+            clear(out);
+            var msg = e.message || '';
+            var extra = /FLOOD|限流/i.test(msg) ? 'Telegram 在限流，歇几分钟再点一次就好。' : '';
+            out.appendChild(el('div', { class: 'tp-alert err' }, [
+              el('b', { text: '翻老片中断' }),
+              el('div', { text: msg + '（已往回翻 ' + tScanned + ' 条，进度已保存，再点一次接着翻）' }),
+              extra ? el('div', { class: 'tp-hint', text: extra }) : null
+            ]));
+            toastErr('翻老片中断：' + (msg || '未知错误'));
+          });
+      }
+      round();
+    };
+
     btn.onclick = function () {
-      if (scanning) return;
+      if (scanning || deepRunning) return;
       scanning = true;
       btn.disabled = true;
 
@@ -1081,6 +1162,7 @@
         ]),
         info
       ]),
+      deepBtn,
       btn
     ]);
   }
@@ -1168,6 +1250,25 @@
       }
     });
 
+    // v16 全量重扫：删掉该频道已导入的文件，从头重新扫一遍，
+    // 老文件的脏名字（时间戳/水印/段号）会按最新规则重新命名。
+    var fullBtn = el('button', {
+      class: 'tp-linkbtn', text: '全量重扫',
+      onclick: function () {
+        if (!confirm('全量重扫会先删除「' + (c.channelName || '该频道') + '」已导入的全部文件，再从头扫描一遍重新入库。\n\nTG 里的片子本体不受影响，扫完会全部回来（名字更干净）。\n\n确定要重扫吗？')) return;
+        fullBtn.textContent = '重扫中…';
+        req('/scan/channels/' + encodeURIComponent(String(c.channelId)) + '/rescanfull', { method: 'POST' })
+          .then(function (r) {
+            var msg = '已重扫：清掉 ' + ((r && r.purged) || 0) + ' 个旧记录，新导入 ' + ((r && r.imported) || 0) + ' 个';
+            if (r && r.duplicates) msg += '，拦下重复 ' + r.duplicates + ' 个';
+            toast(msg);
+            fullBtn.textContent = '全量重扫';
+            setTimeout(function () { loadAutoPane(); }, 1200);
+          })
+          .catch(function (e) { toastErr('重扫失败：' + e.message); fullBtn.textContent = '全量重扫'; });
+      }
+    });
+
     // 「移出」在后端是软删除：只把 enabled 置 false，**不删**已导入的文件，
     // 也保留扫描游标（下次再开启能接着扫，不会重复导入）。
     //
@@ -1194,6 +1295,22 @@
       }
     });
 
+    // v16 彻底删除：文件树 + 文件夹 + 扫描记录一起删（TG 里的片子本体不动，
+    // 但不重新扫描的话网盘里就没了）。和上面的「移出/重新开启」完全两回事。
+    var purgeBtn = el('button', {
+      class: 'tp-linkbtn danger', text: '彻底删除',
+      onclick: function () {
+        if (!confirm('确定要彻底删除「' + (c.channelName || '该频道') + '」吗？\n\n会删掉：已导入的全部文件 + 频道文件夹 + 扫描记录。\nTG 频道里的片子本体不受影响，但网盘里将看不到它们。\n\n此操作不可撤销，确定吗？')) return;
+        purgeBtn.textContent = '删除中…';
+        req('/scan/channels/' + encodeURIComponent(String(c.channelId)) + '/purge', { method: 'DELETE' })
+          .then(function (r) {
+            toast('已彻底删除（清掉 ' + ((r && r.deleted) || 0) + ' 条记录）');
+            loadAutoPane();
+          })
+          .catch(function (e) { toastErr('删除失败：' + e.message); purgeBtn.textContent = '彻底删除'; });
+      }
+    });
+
     return el('div', { class: 'tp-row' + (disabled ? ' is-off' : ''), style: 'flex-wrap:wrap;gap:10px' }, [
       el('div', { style: 'flex:1;min-width:150px' }, [
         el('div', { style: 'font-size:14.5px;font-weight:500' }, [
@@ -1208,7 +1325,9 @@
       ]),
       sel,
       runBtn,
-      delBtn
+      fullBtn,
+      delBtn,
+      purgeBtn
     ]);
   }
 
