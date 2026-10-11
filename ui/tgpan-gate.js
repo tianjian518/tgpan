@@ -251,6 +251,7 @@
               ? '<div class="tgpan-gate-field"><label>验证码</label>'
                 + '<input type="text" inputmode="numeric" id="tgpan-gate-code" placeholder="Telegram 发来的 5 位数字" autocomplete="one-time-code"></div>'
                 + '<button class="tgpan-gate-btn" id="tgpan-gate-go">登录</button>'
+                + '<button class="tgpan-gate-btn ghost" id="tgpan-gate-resend">没收到？改用短信重发</button>'
                 + '<button class="tgpan-gate-btn ghost" id="tgpan-gate-back">换个手机号</button>'
               : '<button class="tgpan-gate-btn" id="tgpan-gate-go">发送验证码</button>')
         )
@@ -263,6 +264,35 @@
   }
 
   function wirePhoneHandlers() {
+    // 【2026-10-11 新增】「改用短信重发」按钮。
+    //
+    // 背景：手机号登录时，只要该号码绑定了 Telegram App，TG 会优先把验证码
+    // **发到 App 内**（AuthSentCodeTypeApp），而不是短信。很多用户会一直盯着
+    // 短信等，误以为"收不到"。后端早已支持 resendcode（见
+    // pkg/services/auth.go 的 case "resendcode"），只是前端没有入口。
+    // 这里补上：点一下就让 TG 换一种方式重发（通常会切成短信）。
+    var rs = document.getElementById('tgpan-gate-resend');
+    if (rs) rs.onclick = function () {
+      if (!state.phoneNo || !state.phoneCodeHash) {
+        setMsg('会话已失效，请返回上一步重新发送验证码。', false);
+        return;
+      }
+      rs.disabled = true;
+      rs.textContent = '正在改用短信重发…';
+      sendWS({
+        authType: 'phone',
+        message: 'resendcode',
+        phoneNo: state.phoneNo,
+        phoneCodeHash: state.phoneCodeHash
+      });
+      setStatus('wait', '正在改用短信重发…');
+      setMsg('已请求改用短信重发，请稍候…', true);
+      setTimeout(function () {
+        var r2 = document.getElementById('tgpan-gate-resend');
+        if (r2) { r2.disabled = false; r2.textContent = '没收到？改用短信重发'; }
+      }, 12000);
+    };
+
     var back = document.getElementById('tgpan-gate-back');
     if (back) back.onclick = function () {
       state.phoneStage = 'idle';
@@ -603,8 +633,24 @@
       if (state.unlockLogin) state.unlockLogin();
       state.phoneCodeHash = payload.phoneCodeHash;
       state.phoneStage = 'code';
-      setStatus('info', '验证码已发出，请查看 Telegram');
-      setMsg('验证码已发送到你的 Telegram。填好后点「登录」只需一次，请耐心等它转完。', true);
+      // 【2026-10-11】区分「首次发码」与「改用短信重发」。
+      // 后端 resendcode 成功时带 resent=1 与 resentType（如 *tg.AuthSentCodeTypeSms）。
+      // 目的：手机号登录时 TG 默认把码发到 **App 内**（AuthSentCodeTypeApp），
+      // 很多用户一直等短信，误以为收不到 —— 这里把「码在哪」说清楚。
+      var rt = String(payload.resentType || '');
+      var viaSms = rt.indexOf('Sms') >= 0;
+      if (payload.resent === '1') {
+        if (viaSms) {
+          setStatus('ok', '已改用短信重发');
+          setMsg('已改用【短信】发送，请查看手机短信（通常来自 106 开头的号码）。填好后点「登录」，只点一次。', true);
+        } else {
+          setStatus('info', '已重新发送');
+          setMsg('已重新发送到 Telegram App。请打开 Telegram，在对话列表里找名为「Telegram」的官方消息，验证码就在里面。', true);
+        }
+      } else {
+        setStatus('info', '验证码已发出，请查看 Telegram');
+        setMsg('验证码发到了你的 Telegram App（不是短信）——打开 Telegram，找对话列表里名为「Telegram」的官方消息。确实收不到就点下面「没收到？改用短信重发」。', true);
+      }
       if (state.mode !== 'phone') switchMode('phone'); else renderPanel();
       return;
     }
